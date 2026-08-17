@@ -1,0 +1,10 @@
+{
+  "name": "tktkgo",
+  "private": true,
+  "packageManager": "pnpm@11.22.0",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @tktkgo/web --filter @tktkgo/render dev",
+    "build": "pnpm --filter @tktkgo/render build && pnpm --filter @tktkgo/web build",
+    "format": "pnpm -r format"
+  }
+}

@@ -1,0 +1,26 @@
+[package]
+name = "tktkgo-app"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+base64.workspace = true
+blake3.workspace = true
+chrono.workspace = true
+diesel.workspace = true
+diesel-async.workspace = true
+diesel_migrations.workspace = true
+dotenvy = "0.15.7"
+reqwest.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+

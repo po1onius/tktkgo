@@ -1,0 +1,35 @@
+name: tktkgo
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: tktkgo
+      POSTGRES_USER: tktkgo
+      POSTGRES_PASSWORD: tktkgo
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tktkgo -d tktkgo"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  restate:
+    image: docker.restate.dev/restatedev/restate:1.7
+    ports:
+      - "8080:8080"
+      - "9070:9070"
+      - "5122:5122"
+    volumes:
+      - restate-data:/restate-data
+    environment:
+      RESTATE_NODE_NAME: tktkgo-local
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  postgres-data:
+  restate-data:

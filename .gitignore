@@ -1,0 +1,14 @@
+.env
+.DS_Store
+target/
+node_modules/
+.next/
+dist/
+coverage/
+storage/*
+!storage/.gitkeep
+render-output/
+*.mp4
+*.wav
+*.log
+

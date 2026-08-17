@@ -1,0 +1,23 @@
+{
+  "name": "@tktkgo/web",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "format": "prettier --write app"
+  },
+  "dependencies": {
+    "next": "16.3.1",
+    "react": "19.2.3",
+    "react-dom": "19.2.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.10.4",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "prettier": "3.8.2",
+    "typescript": "7.0.2"
+  }
+}

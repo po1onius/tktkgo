@@ -1,0 +1,17 @@
+[package]
+name = "tktkgo-workflow"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+restate-sdk.workspace = true
+serde.workspace = true
+tktkgo-app = { path = "../../crates/app" }
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+

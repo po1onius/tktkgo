@@ -1,0 +1,7 @@
+DROP TABLE IF EXISTS provider_usages;
+DROP TABLE IF EXISTS renders;
+DROP TABLE IF EXISTS generation_tasks;
+DROP TABLE IF EXISTS assets;
+DROP TABLE IF EXISTS scenes;
+DROP TABLE IF EXISTS project_versions;
+DROP TABLE IF EXISTS projects;

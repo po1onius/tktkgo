@@ -1,0 +1,7 @@
+packages:
+  - web
+  - render
+
+# Remotion/tsx 依赖 esbuild 的平台二进制安装脚本，仅允许这个明确需要的构建依赖执行脚本。
+allowBuilds:
+  esbuild: true
