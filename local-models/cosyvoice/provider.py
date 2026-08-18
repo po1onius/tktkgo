@@ -174,9 +174,9 @@ def synthesize(request: SpeechRequest, profile: VoiceProfile) -> bytes:
         if value and value.strip()
     )
     if instructions:
-        # CosyVoice 3 的 instruct2 模板要求控制标记位于系统提示和具体指令之间。
+        # CosyVoice 3 官方 instruct2 协议要求 <|endofprompt|> 位于完整指令末尾。
         # voices.json 只保存自然语言指令，避免音色配置泄漏模型协议细节。
-        instructions = f"You are a helpful assistant.<|endofprompt|>{instructions}"
+        instructions = f"You are a helpful assistant. {instructions}<|endofprompt|>"
         generated = model.inference_instruct2(
             request.input,
             instructions,
@@ -184,9 +184,16 @@ def synthesize(request: SpeechRequest, profile: VoiceProfile) -> bytes:
             stream=False,
         )
     else:
+        # CosyVoice 3 的零样本模式会把参考文本和待合成文本拼接后送入 LLM，
+        # 官方协议要求参考文本带有系统提示和结束标记。该标记不能依赖文本
+        # 前端自动补齐，否则 wetext/ttsfrd 未安装时真实推理才会失败。
+        prompt_text = (
+            "You are a helpful assistant.<|endofprompt|>"
+            f"{profile.prompt_text}"
+        )
         generated = model.inference_zero_shot(
             request.input,
-            profile.prompt_text,
+            prompt_text,
             profile.prompt_wav,
             stream=False,
         )

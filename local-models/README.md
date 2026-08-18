@@ -20,7 +20,7 @@ make faster-whisper
 make cosyvoice
 ```
 
-该目标会自动克隆 CosyVoice 官方仓库的已验证提交及其子模块、创建独立 Python 3.10 环境、安装官方依赖，并在服务启动时把缺失的 ModelScope 权重下载到 `local-models/cosyvoice/models/`。上游目前只有 `v2.0` 发布标签，尚无支持 CosyVoice 3 的稳定标签，因此 Makefile 固定了主线提交，避免部署结果随默认分支漂移。
+该目标会自动克隆 CosyVoice 官方仓库的已验证提交及其子模块、创建独立 Python 3.10 环境、安装 CPU 推理依赖，并在服务启动时把缺失的 ModelScope 权重下载到 `local-models/cosyvoice/models/`。官方 Linux requirements 强制安装 CUDA/TensorRT，因此没有 NVIDIA 驱动的默认部署使用同版本的 PyTorch CPU 和 ONNX Runtime CPU；GPU 机器应先按官方要求准备驱动，并通过 `COSYVOICE_REQUIREMENTS` 指定受控的 GPU 依赖文件。上游目前只有 `v2.0` 发布标签，尚无支持 CosyVoice 3 的稳定标签，因此 Makefile 固定了主线提交，避免部署结果随默认分支漂移。
 
 参考音色包含用户自己的语音，无法从公开模型仓库自动获得。第一次运行会创建 `voices.json` 并停止；请把干净的单人参考 WAV 放入 `voices/`，确保 `prompt_text` 与录音内容完全一致，然后重新执行命令。模型与服务参数位于独立的 `local-models/cosyvoice/provider.toml`。
 

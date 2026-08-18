@@ -6,6 +6,7 @@ GIT ?= git
 FASTER_WHISPER_CONFIG ?= faster-whisper/provider.toml
 COSYVOICE_CONFIG ?= cosyvoice/provider.toml
 COSYVOICE_PYTHON ?= cosyvoice/.venv/bin/python
+COSYVOICE_REQUIREMENTS ?= cosyvoice/requirements-cpu.txt
 # CosyVoice 3 尚无对应的稳定 release tag，固定官方主线的已验证提交，避免每次部署漂移。
 COSYVOICE_REVISION ?= 074ca6dc9e80a2f424f1f74b48bdd7d3fea531cc
 
@@ -47,7 +48,15 @@ prepare-cosyvoice: ## 准备 CosyVoice 官方仓库和独立 Python 3.10 环境
 		$(UV) venv --python 3.10 cosyvoice/.venv; \
 	fi
 	@echo "[cosyvoice] 同步官方依赖和本地 HTTP 服务依赖"
-	$(UV) pip install --python "$(COSYVOICE_PYTHON)" -r cosyvoice/CosyVoice/requirements.txt
+	# openai-whisper 旧版构建脚本隐式依赖 pkg_resources；setuptools 81+ 已逐步
+	# 移除该接口，因此仅为这个上游固定版本准备最后一个兼容稳定版。
+	$(UV) pip install --python "$(COSYVOICE_PYTHON)" setuptools==80.9.0
+	# 默认安装无 NVIDIA 驱动也能工作的 CPU 推理依赖；如已按官方方式准备 GPU
+	# 环境，可通过 COSYVOICE_REQUIREMENTS 指向自己的受控依赖文件。
+	$(UV) pip install --python "$(COSYVOICE_PYTHON)" \
+		--index-strategy unsafe-best-match \
+		--no-build-isolation-package openai-whisper \
+		-r "$(COSYVOICE_REQUIREMENTS)"
 	$(UV) pip install --python "$(COSYVOICE_PYTHON)" \
 		fastapi==0.141.1 uvicorn==0.52.3 tomli==2.4.1
 
