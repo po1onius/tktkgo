@@ -35,7 +35,9 @@ def crop_image(image: bytes, width: int, height: int) -> bytes:
             output = io.BytesIO()
             cropped.save(output, format="PNG", optimize=True)
     except (UnidentifiedImageError, OSError, ValueError) as error:
-        raise HTTPException(status_code=502, detail=f"上游返回的图片无法解码: {error}") from error
+        raise HTTPException(
+            status_code=502, detail=f"上游返回的图片无法解码: {error}"
+        ) from error
     result = output.getvalue()
     logger.info(
         "图片裁剪完成 source_width=%d source_height=%d output_width=%d output_height=%d output_bytes=%d",
@@ -57,7 +59,9 @@ def validate_wav(audio: bytes) -> None:
             sample_rate = wav.getframerate()
             frames = wav.getnframes()
     except (wave.Error, EOFError) as error:
-        raise HTTPException(status_code=502, detail=f"上游返回的 WAV 无法解码: {error}") from error
+        raise HTTPException(
+            status_code=502, detail=f"上游返回的 WAV 无法解码: {error}"
+        ) from error
     if channels <= 0 or sample_rate <= 0 or frames <= 0:
         raise HTTPException(status_code=502, detail="上游返回了空 WAV")
     logger.info(

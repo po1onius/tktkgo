@@ -1,0 +1,42 @@
+# 固定 Provider 网关的独立配置。运行 `make` 会复制本文件为 providers.toml。
+[gateway]
+host = "127.0.0.1"
+port = 8110
+log_level = "INFO"
+
+# 远程 Provider：只有被下方 models 引用时才要求配置 api_key。
+[providers.openai]
+api_key = ""
+base_url = "https://api.openai.com/v1"
+
+[providers.deepseek]
+api_key = ""
+base_url = "https://api.deepseek.com"
+
+[providers.pic2api]
+api_key = ""
+base_url = "https://pic2api.com/v1"
+
+# 本地 Provider 在网关中只有 HTTP 地址；模型安装和进程生命周期属于 local-models。
+[providers.faster_whisper]
+base_url = "http://127.0.0.1:8102"
+
+[providers.cosy_voice]
+base_url = "http://127.0.0.1:8101"
+
+# 每类能力至少配置一个模型。数组顺序就是前端目录中的模型顺序。
+[models.text]
+openai = ["gpt-5.6-terra"]
+deepseek = []
+
+[models.image]
+openai = ["gpt-image-2"]
+pic2api = []
+
+[models.speech]
+openai = ["gpt-4o-mini-tts"]
+cosy_voice = []
+
+[models.transcription]
+openai = ["whisper-1"]
+faster_whisper = []

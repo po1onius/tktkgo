@@ -2,7 +2,9 @@
 
 import { FormEvent, useEffect, useState } from "react";
 
-const apiBase = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
+// 网页与 API 由同一个 Axum 服务提供，始终使用相对地址继承当前协议、域名和端口。
+// 不在静态构建中固化部署地址，避免换域名或通过反向代理访问时产生跨域请求。
+const apiBase = "";
 
 type Project = {
   id: string;
@@ -190,7 +192,7 @@ export default function Home() {
         !selectedSpeech ||
         !selectedTranscription
       ) {
-        throw new Error("模型目录尚未就绪，请先启动 make models");
+        throw new Error("模型目录尚未就绪，请先启动 make provider");
       }
       const created = await request<Project>("/v1/projects", {
         method: "POST",

@@ -5,36 +5,26 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
-import os
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
+from config import load_config, resolve_config_path
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from faster_whisper import WhisperModel
 from pydantic import BaseModel
 
-
-def env(name: str, default: str) -> str:
-    """读取非空环境变量；空字符串按配置错误处理，避免静默使用错误模型。"""
-
-    value = os.getenv(name, default).strip()
-    if not value:
-        raise RuntimeError(f"环境变量 {name} 不能为空")
-    return value
-
-
-MODEL_NAME = env("TKTKGO_FASTER_WHISPER_MODEL", "large-v3")
-DEVICE = env("TKTKGO_FASTER_WHISPER_DEVICE", "cpu")
-COMPUTE_TYPE = env("TKTKGO_FASTER_WHISPER_COMPUTE_TYPE", "int8")
-LANGUAGE = env("TKTKGO_FASTER_WHISPER_LANGUAGE", "zh")
-CPU_THREADS = int(env("TKTKGO_FASTER_WHISPER_CPU_THREADS", "0"))
-NUM_WORKERS = int(env("TKTKGO_FASTER_WHISPER_NUM_WORKERS", "1"))
-HOST = env("TKTKGO_FASTER_WHISPER_HOST", "127.0.0.1")
-PORT = int(env("TKTKGO_FASTER_WHISPER_PORT", "8102"))
+settings, settings_path = load_config()
+MODEL_NAME = settings.model.name
+DEVICE = settings.model.device
+COMPUTE_TYPE = settings.model.compute_type
+LANGUAGE = settings.model.language
+CPU_THREADS = settings.model.cpu_threads
+NUM_WORKERS = settings.model.num_workers
+DOWNLOAD_ROOT = resolve_config_path(settings_path, settings.model.download_root)
 
 logging.basicConfig(
-    level=os.getenv("TKTKGO_LOCAL_PROVIDER_LOG", "INFO").upper(),
+    level=settings.server.log_level,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("tktkgo.faster_whisper")
@@ -66,13 +56,18 @@ state = RuntimeState()
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info(
-        "faster-whisper Provider 已启动，模型将在首次请求时加载 model=%s device=%s compute_type=%s cpu_threads=%d workers=%d",
+        "faster-whisper 开始准备模型 model=%s download_root=%s device=%s compute_type=%s cpu_threads=%d workers=%d",
         MODEL_NAME,
+        DOWNLOAD_ROOT,
         DEVICE,
         COMPUTE_TYPE,
         CPU_THREADS,
         NUM_WORKERS,
     )
+    # WhisperModel 会从 Hugging Face 自动下载缺失权重。启动阶段完成加载，健康检查
+    # 返回成功时即可确定该独立部署已经具备实际处理请求的能力。
+    await ensure_model()
+    logger.info("faster-whisper Provider 已就绪 model=%s", MODEL_NAME)
     yield
     state.model = None
     logger.info("faster-whisper Provider 已停止")
@@ -94,7 +89,7 @@ async def health() -> dict[str, Any]:
 
 
 async def ensure_model() -> WhisperModel:
-    """首次请求时串行加载模型，避免前端未选择本地字幕时占用大量内存。"""
+    """串行下载并加载模型，避免多个初始化请求重复占用磁盘和内存。"""
 
     if state.model is not None:
         return state.model
@@ -115,6 +110,7 @@ async def ensure_model() -> WhisperModel:
             compute_type=COMPUTE_TYPE,
             cpu_threads=CPU_THREADS,
             num_workers=NUM_WORKERS,
+            download_root=str(DOWNLOAD_ROOT),
         )
         logger.info(
             "faster-whisper 加载完成 model=%s elapsed_ms=%d",
@@ -206,4 +202,9 @@ async def align(
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    uvicorn.run(
+        app,
+        host=settings.server.host,
+        port=settings.server.port,
+        log_level=settings.server.log_level.lower(),
+    )

@@ -17,7 +17,6 @@ use tktkgo_app::{
     run_migrations,
 };
 use tower_http::{
-    cors::{Any, CorsLayer},
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     services::ServeDir,
     trace::TraceLayer,
@@ -38,6 +37,7 @@ struct ApiState {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging();
     let settings = Settings::from_env()?;
+    validate_web_root(&settings).await?;
     run_migrations(settings.database_url.clone()).await?;
     let repository = Repository::new(create_pool(&settings.database_url).await?);
     let state = Arc::new(ApiState {
@@ -65,22 +65,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(review_script),
         )
         .nest_service("/assets", ServeDir::new(&settings.asset_root))
+        // API 路由优先匹配，其余请求交给 Next.js 的静态导出目录处理。
+        // ServeDir 会自动为根路径返回 index.html，并为不存在的文件保留正确的 404。
+        .fallback_service(ServeDir::new(&settings.web_root))
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
         .layer(TraceLayer::new_for_http())
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(settings.api_addr).await?;
-    info!(address = %settings.api_addr, "tktkgo API 已启动");
+    info!(
+        address = %settings.api_addr,
+        web_root = %settings.web_root.display(),
+        "tktkgo API 与 Web 已启动"
+    );
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    Ok(())
+}
+
+/// Web 构建产物是 API 的必要运行资源。配置或构建缺失时立即终止启动，
+/// 避免 API 看似健康、实际访问首页却只能得到 404 的不完整运行状态。
+async fn validate_web_root(settings: &Settings) -> Result<(), AppError> {
+    let index_path = settings.web_root.join("index.html");
+    let metadata = tokio::fs::metadata(&index_path).await.map_err(|error| {
+        AppError::Config(format!(
+            "Web 构建产物不存在或不可读：{}；请先在项目根目录执行 pnpm --filter @tktkgo/web build：{error}",
+            index_path.display()
+        ))
+    })?;
+    if !metadata.is_file() {
+        return Err(AppError::Config(format!(
+            "Web 入口不是普通文件：{}；请重新执行 pnpm --filter @tktkgo/web build",
+            index_path.display()
+        )));
+    }
+    info!(web_index = %index_path.display(), "Web 静态构建产物校验完成");
     Ok(())
 }
 

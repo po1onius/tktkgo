@@ -2,7 +2,7 @@
 name = "tktkgo-model-gateway"
 version = "0.1.0"
 description = "tktkgo 固定模型能力 API 与供应商适配网关"
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.11,<3.15"
 dependencies = [
   "fastapi==0.141.1",
   "httpx==0.28.1",

@@ -1,0 +1,14 @@
+[server]
+host = "127.0.0.1"
+port = 8101
+log_level = "INFO"
+
+[model]
+name = "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
+# ModelScope 权重会在启动时自动下载到此目录。
+cache_dir = "./models"
+fp16 = false
+
+[runtime]
+cosyvoice_root = "./CosyVoice"
+voices_file = "./voices.json"

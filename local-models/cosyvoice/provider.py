@@ -14,32 +14,24 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from config import load_config, resolve_config_path
 from fastapi import FastAPI, HTTPException, Response
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+settings, settings_path = load_config()
+COSYVOICE_ROOT = resolve_config_path(settings_path, settings.runtime.cosyvoice_root)
+MODEL_NAME = settings.model.name
+MODEL_CACHE = resolve_config_path(settings_path, settings.model.cache_dir)
+VOICES_FILE = resolve_config_path(settings_path, settings.runtime.voices_file)
+FP16 = settings.model.fp16
 
-def env(name: str, default: str | None = None) -> str:
-    value = os.getenv(name, default or "").strip()
-    if not value:
-        raise RuntimeError(f"环境变量 {name} 不能为空")
-    return value
-
-
-COSYVOICE_ROOT = Path(
-    env("TKTKGO_COSYVOICE_ROOT", "./local-providers/cosyvoice/CosyVoice")
-).expanduser().resolve()
-MODEL_NAME = env(
-    "TKTKGO_COSYVOICE_MODEL", "FunAudioLLM/Fun-CosyVoice3-0.5B-2512"
-)
-VOICES_FILE = Path(
-    env("TKTKGO_COSYVOICE_VOICES_FILE", "./local-providers/cosyvoice/voices.json")
-).expanduser().resolve()
-HOST = env("TKTKGO_COSYVOICE_HOST", "127.0.0.1")
-PORT = int(env("TKTKGO_COSYVOICE_PORT", "8101"))
-FP16 = env("TKTKGO_COSYVOICE_FP16", "false").lower() in {"1", "true", "yes"}
+# CosyVoice 官方加载器通过 ModelScope 下载远程模型。缓存目录由本部署独占，
+# 避免本地模型文件与 Provider 网关或用户全局缓存形成隐式耦合。
+MODEL_CACHE.mkdir(parents=True, exist_ok=True)
+os.environ["MODELSCOPE_CACHE"] = str(MODEL_CACHE)
 
 logging.basicConfig(
-    level=os.getenv("TKTKGO_LOCAL_PROVIDER_LOG", "INFO").upper(),
+    level=settings.server.log_level,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger("tktkgo.cosyvoice")
@@ -64,10 +56,11 @@ class SpeechRequest(BaseModel):
 
 
 class RuntimeState:
-    model: Any = None
-    voices: dict[str, VoiceProfile] = {}
-    load_lock = asyncio.Lock()
-    lock = asyncio.Lock()
+    def __init__(self) -> None:
+        self.model: Any = None
+        self.voices: dict[str, VoiceProfile] = {}
+        self.load_lock = asyncio.Lock()
+        self.lock = asyncio.Lock()
 
 
 state = RuntimeState()
@@ -107,11 +100,16 @@ async def lifespan(_: FastAPI):
         raise RuntimeError(f"CosyVoice 官方仓库目录不存在: {COSYVOICE_ROOT}")
     state.voices = load_voices()
     logger.info(
-        "CosyVoice Provider 已启动，模型将在首次请求时加载 model=%s fp16=%s voices=%s",
+        "CosyVoice 开始准备模型 model=%s cache_dir=%s fp16=%s voices=%s",
         MODEL_NAME,
+        MODEL_CACHE,
         FP16,
         sorted(state.voices),
     )
+    # AutoModel 会自动下载缺失的 ModelScope 权重。把加载放在启动阶段，避免服务
+    # 健康但第一次业务请求才暴露网络、磁盘或模型配置错误。
+    await ensure_model()
+    logger.info("CosyVoice Provider 已就绪 model=%s", MODEL_NAME)
     yield
     state.model = None
     logger.info("CosyVoice Provider 已停止")
@@ -132,7 +130,7 @@ async def health() -> dict[str, Any]:
 
 
 async def ensure_model() -> Any:
-    """延迟加载大模型，使前端选择 OpenAI 时不占用本地 GPU/内存。"""
+    """串行下载并加载模型，避免多个初始化请求争用同一缓存。"""
 
     if state.model is not None:
         return state.model
@@ -193,10 +191,7 @@ def synthesize(request: SpeechRequest, profile: VoiceProfile) -> bytes:
             stream=False,
         )
 
-    chunks = [
-        item["tts_speech"].detach().cpu().squeeze().numpy()
-        for item in generated
-    ]
+    chunks = [item["tts_speech"].detach().cpu().squeeze().numpy() for item in generated]
     return to_wav(chunks, model.sample_rate)
 
 
@@ -254,4 +249,9 @@ async def speech(request: SpeechRequest) -> Response:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host=HOST, port=PORT, log_level="info")
+    uvicorn.run(
+        app,
+        host=settings.server.host,
+        port=settings.server.port,
+        log_level=settings.server.log_level.lower(),
+    )

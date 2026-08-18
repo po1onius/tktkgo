@@ -3,6 +3,7 @@
 target/
 node_modules/
 .next/
+out/
 dist/
 coverage/
 storage/*
@@ -14,8 +15,13 @@ render-output/
 __pycache__/
 *.py[cod]
 
-# 本地模型、Python 虚拟环境和私有音色样本体积较大，不纳入版本控制。
-local-providers/**/.venv/
-local-providers/cosyvoice/CosyVoice/
-local-providers/cosyvoice/voices/
-local-providers/cosyvoice/voices.json
+# Provider Key、本地模型权重、Python 环境和私有音色样本不纳入版本控制。
+provider/providers.toml
+# 旧版聚合配置仅为迁移保留，新架构不会读取。
+local-providers/providers.toml
+local-models/**/.venv/
+local-models/**/provider.toml
+local-models/**/models/
+local-models/cosyvoice/CosyVoice/
+local-models/cosyvoice/voices/
+local-models/cosyvoice/voices.json

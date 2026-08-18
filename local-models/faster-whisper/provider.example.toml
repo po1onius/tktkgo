@@ -1,0 +1,14 @@
+[server]
+host = "127.0.0.1"
+port = 8102
+log_level = "INFO"
+
+[model]
+name = "large-v3"
+# 权重在启动时自动下载到本服务目录；也可以填写已经下载的本地绝对路径。
+download_root = "./models"
+device = "cpu"
+compute_type = "int8"
+language = "zh"
+cpu_threads = 0
+num_workers = 1
