@@ -7,6 +7,7 @@ CARGO ?= cargo
 PNPM ?= pnpm
 CURL ?= curl
 ENV_FILE ?= .env
+LOCAL_MODELS_ENV_FILE ?= local-providers/.env
 
 API_URL ?= http://127.0.0.1:8000
 WORKFLOW_URL ?= http://127.0.0.1:9080
@@ -14,7 +15,7 @@ RESTATE_ADMIN_URL ?= http://127.0.0.1:9070
 # Restate 位于容器内，通过 Compose 配置的宿主机网关访问本地 Workflow。
 WORKFLOW_DEPLOYMENT_URI ?= http://host.docker.internal:9080
 
-.PHONY: dev
+.PHONY: dev models
 
 dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 	@set -Eeuo pipefail; \
@@ -137,4 +138,79 @@ dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 	status=$$?; \
 	set -e; \
 	echo "[local] 检测到服务退出，退出码：$$status" >&2; \
+	exit "$$status"
+
+models: ## 独立启动本地 CosyVoice 和 faster-whisper Provider
+	@set -Eeuo pipefail; \
+	for tool in uv "$(CURL)"; do \
+		if ! command -v "$$tool" >/dev/null; then \
+			echo "[tools] 未找到 $$tool，请手动安装后重试" >&2; \
+			exit 1; \
+		fi; \
+	done; \
+	if [[ ! -f "$(LOCAL_MODELS_ENV_FILE)" ]]; then \
+		cp local-providers/.env.example "$(LOCAL_MODELS_ENV_FILE)"; \
+		echo "[models] 已创建 $(LOCAL_MODELS_ENV_FILE)，请按需调整模型和设备配置"; \
+	fi; \
+	set -a; source "$(LOCAL_MODELS_ENV_FILE)"; set +a; \
+	cosyvoice_pid=""; \
+	faster_whisper_pid=""; \
+	wait_provider() { \
+		name="$$1"; pid="$$2"; url="$$3"; \
+		for attempt in $$(seq 1 90); do \
+			if ! kill -0 "$$pid" 2>/dev/null; then \
+				echo "[$$name] Provider 提前退出，请检查上方日志" >&2; \
+				return 1; \
+			fi; \
+			if $(CURL) --silent --fail --output /dev/null --connect-timeout 1 "$${url%/}/health"; then \
+				echo "[$$name] Provider 已就绪"; \
+				return 0; \
+			fi; \
+			sleep 1; \
+		done; \
+		echo "[$$name] Provider 90 秒内未就绪" >&2; \
+		return 1; \
+	}; \
+	cleanup_models() { \
+		status=$$?; \
+		trap - EXIT INT TERM; \
+		echo "[models] 正在停止本地模型服务"; \
+		for pid in "$$cosyvoice_pid" "$$faster_whisper_pid"; do \
+			if [[ -n "$$pid" ]] && kill -0 "$$pid" 2>/dev/null; then kill "$$pid" 2>/dev/null || true; fi; \
+		done; \
+		for pid in "$$cosyvoice_pid" "$$faster_whisper_pid"; do \
+			if [[ -n "$$pid" ]]; then wait "$$pid" 2>/dev/null || true; fi; \
+		done; \
+		exit "$$status"; \
+	}; \
+	trap cleanup_models EXIT INT TERM; \
+	if [[ "$${TKTKGO_FASTER_WHISPER_ENABLED:-true}" == "true" ]]; then \
+		echo "[faster-whisper] 同步 uv 环境并启动 Provider"; \
+		uv sync --project local-providers/faster-whisper --frozen; \
+		uv run --project local-providers/faster-whisper --frozen \
+			python local-providers/faster-whisper/provider.py & \
+		faster_whisper_pid=$$!; \
+		wait_provider "faster-whisper" "$$faster_whisper_pid" "http://127.0.0.1:$${TKTKGO_FASTER_WHISPER_PORT:-8102}"; \
+	fi; \
+	if [[ "$${TKTKGO_COSYVOICE_ENABLED:-false}" == "true" ]]; then \
+		cosyvoice_python="$${TKTKGO_COSYVOICE_PYTHON:-./local-providers/cosyvoice/.venv/bin/python}"; \
+		if [[ ! -x "$$cosyvoice_python" ]]; then \
+			echo "[cosyvoice] Python 环境不存在，请按 local-providers/README.md 安装" >&2; \
+			exit 1; \
+		fi; \
+		echo "[cosyvoice] 启动 Provider"; \
+		"$$cosyvoice_python" local-providers/cosyvoice/provider.py & \
+		cosyvoice_pid=$$!; \
+		wait_provider "cosyvoice" "$$cosyvoice_pid" "http://127.0.0.1:$${TKTKGO_COSYVOICE_PORT:-8101}"; \
+	fi; \
+	model_pids=(); \
+	if [[ -n "$$cosyvoice_pid" ]]; then model_pids+=("$$cosyvoice_pid"); fi; \
+	if [[ -n "$$faster_whisper_pid" ]]; then model_pids+=("$$faster_whisper_pid"); fi; \
+	if [[ "$${#model_pids[@]}" == "0" ]]; then \
+		echo "[models] 没有启用任何本地模型，请编辑 $(LOCAL_MODELS_ENV_FILE)" >&2; \
+		exit 1; \
+	fi; \
+	echo "[models] 本地模型服务已启动；按 Ctrl+C 停止"; \
+	set +e; wait -n "$${model_pids[@]}"; status=$$?; set -e; \
+	echo "[models] 检测到 Provider 退出，退出码：$$status" >&2; \
 	exit "$$status"

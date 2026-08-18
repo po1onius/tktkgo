@@ -13,7 +13,7 @@ use crate::{
         StoryboardSpec, TransitionKind, VisualType,
     },
     media::probe_duration_ms,
-    providers::{AiProvider, ProviderOutput},
+    providers::{GenerationProviders, ProviderOutput},
     render::RenderClient,
     storage::AssetStore,
 };
@@ -21,7 +21,7 @@ use crate::{
 #[derive(Clone)]
 pub struct PipelineService {
     repository: Repository,
-    ai: Arc<dyn AiProvider>,
+    providers: GenerationProviders,
     storage: Arc<dyn AssetStore>,
     renderer: RenderClient,
     asset_root: PathBuf,
@@ -30,14 +30,14 @@ pub struct PipelineService {
 impl PipelineService {
     pub fn new(
         repository: Repository,
-        ai: Arc<dyn AiProvider>,
+        providers: GenerationProviders,
         storage: Arc<dyn AssetStore>,
         renderer: RenderClient,
         asset_root: PathBuf,
     ) -> Self {
         Self {
             repository,
-            ai,
+            providers,
             storage,
             renderer,
             asset_root,
@@ -56,10 +56,11 @@ impl PipelineService {
         version: &ProjectVersion,
     ) -> AppResult<ScriptSpec> {
         let key = format!(
-            "{}:{}:script:{}",
+            "{}:{}:script:{}:{}",
             project.id,
             version.version,
-            self.ai.text_model()
+            self.providers.text().name(),
+            self.providers.text().model()
         );
         if let Some(cached) = self.cached::<ScriptSpec>(&key).await? {
             return Ok(cached);
@@ -72,10 +73,15 @@ impl PipelineService {
                 scene_id: None,
                 stage: "script",
                 key: &key,
-                model: self.ai.text_model(),
+                provider: self.providers.text().name(),
+                model: self.providers.text().model(),
             })
             .await?;
-        let output = self.ai.generate_script(project, task_id).await;
+        let output = self
+            .providers
+            .text()
+            .generate_script(project, task_id)
+            .await;
         match output {
             Ok(output) => {
                 self.repository
@@ -101,10 +107,11 @@ impl PipelineService {
     ) -> AppResult<StoryboardSpec> {
         let input = serde_json::to_vec(script)?;
         let key = format!(
-            "{}:{}:storyboard:{}:{}",
+            "{}:{}:storyboard:{}:{}:{}",
             project.id,
             version.version,
-            self.ai.text_model(),
+            self.providers.text().name(),
+            self.providers.text().model(),
             short_hash(&input)
         );
         if let Some(cached) = self.cached::<StoryboardSpec>(&key).await? {
@@ -118,10 +125,15 @@ impl PipelineService {
                 scene_id: None,
                 stage: "storyboard",
                 key: &key,
-                model: self.ai.text_model(),
+                provider: self.providers.text().name(),
+                model: self.providers.text().model(),
             })
             .await?;
-        let output = self.ai.generate_storyboard(project, script, task_id).await;
+        let output = self
+            .providers
+            .text()
+            .generate_storyboard(project, script, task_id)
+            .await;
         match output {
             Ok(output) => {
                 validate_storyboard(&output.value)?;
@@ -155,12 +167,26 @@ impl PipelineService {
             scene.visual_prompt.as_str(),
             style,
         ))?;
+        let speech_provider = self.providers.speech(&project.speech_provider)?;
+        let transcription_provider = self
+            .providers
+            .transcription(&project.transcription_provider)?;
+        // 场景素材由三个独立 Provider 协作生成，任一实现或模型变化都必须使缓存失效。
+        let provider_signature = format!(
+            "image={}/{};speech={}/{};transcription={}/{}",
+            self.providers.image().name(),
+            self.providers.image().model(),
+            speech_provider.name(),
+            project.speech_model,
+            transcription_provider.name(),
+            project.transcription_model,
+        );
         let key = format!(
             "{}:{}:scene:{}:{}:{}",
             project.id,
             version.version,
             scene.sequence,
-            self.ai.image_model(),
+            short_hash(provider_signature.as_bytes()),
             short_hash(&input)
         );
         if let Some(cached) = self.cached::<GeneratedScene>(&key).await? {
@@ -174,7 +200,8 @@ impl PipelineService {
                 scene_id: Some(scene.id),
                 stage: "scene_assets",
                 key: &key,
-                model: self.ai.image_model(),
+                provider: "pipeline",
+                model: "scene-assets-v1",
             })
             .await?;
         let result = self
@@ -210,10 +237,19 @@ impl PipelineService {
             style.image_rules.join("；"),
             style.negative_prompt
         );
-        let image = self.ai.generate_image(&prompt, portrait, task_id).await?;
-        let speech = self
-            .ai
-            .synthesize_speech(&scene.narration_text, &project.voice, task_id)
+        let image = self
+            .providers
+            .image()
+            .generate_image(&prompt, portrait, task_id)
+            .await?;
+        let speech_provider = self.providers.speech(&project.speech_provider)?;
+        let speech = speech_provider
+            .synthesize_speech(
+                &scene.narration_text,
+                &project.voice,
+                &project.speech_model,
+                task_id,
+            )
             .await?;
 
         let base_key = format!("projects/{}/scenes/{}", project.id, scene.id);
@@ -232,9 +268,16 @@ impl PipelineService {
             .await?;
         let duration_ms = probe_duration_ms(self.asset_root.join(&audio_key)).await?;
 
-        let aligned = self
-            .ai
-            .align_speech(speech.value, &scene.narration_text, task_id)
+        let transcription_provider = self
+            .providers
+            .transcription(&project.transcription_provider)?;
+        let aligned = transcription_provider
+            .align_speech(
+                speech.value,
+                &scene.narration_text,
+                &project.transcription_model,
+                task_id,
+            )
             .await?;
         let caption_bytes = serde_json::to_vec_pretty(&aligned.value)?;
         let caption_object = self
@@ -250,30 +293,39 @@ impl PipelineService {
             .insert_asset(
                 project.id,
                 scene.id,
-                "image",
-                self.ai.image_model(),
-                &image_object,
-                json!({"usage": image.usage}),
+                AssetDescriptor {
+                    kind: "image",
+                    provider: self.providers.image().name(),
+                    model: self.providers.image().model(),
+                    object: &image_object,
+                    metadata: json!({"usage": image.usage}),
+                },
             )
             .await?;
         let audio_asset = self
             .insert_asset(
                 project.id,
                 scene.id,
-                "audio",
-                self.ai.tts_model(),
-                &audio_object,
-                json!({"usage": speech.usage, "duration_ms": duration_ms}),
+                AssetDescriptor {
+                    kind: "audio",
+                    provider: speech_provider.name(),
+                    model: &project.speech_model,
+                    object: &audio_object,
+                    metadata: json!({"usage": speech.usage, "duration_ms": duration_ms}),
+                },
             )
             .await?;
         let caption_asset = self
             .insert_asset(
                 project.id,
                 scene.id,
-                "captions",
-                "whisper-1",
-                &caption_object,
-                json!({"usage": aligned.usage}),
+                AssetDescriptor {
+                    kind: "captions",
+                    provider: transcription_provider.name(),
+                    model: &project.transcription_model,
+                    object: &caption_object,
+                    metadata: json!({"usage": aligned.usage}),
+                },
             )
             .await?;
         self.repository
@@ -304,18 +356,22 @@ impl PipelineService {
         &self,
         project_id: Uuid,
         scene_id: Uuid,
-        kind: &str,
-        model: &str,
-        object: &crate::storage::StoredObject,
-        metadata: Value,
+        asset: AssetDescriptor<'_>,
     ) -> AppResult<AssetRecord> {
+        let AssetDescriptor {
+            kind,
+            provider,
+            model,
+            object,
+            metadata,
+        } = asset;
         self.repository
             .insert_asset(&NewAsset {
                 id: Uuid::new_v4(),
                 project_id,
                 scene_id: Some(scene_id),
                 kind: kind.into(),
-                provider: self.ai.name().into(),
+                provider: provider.into(),
                 provider_asset_id: Some(model.into()),
                 storage_key: object.key.clone(),
                 public_url: object.public_url.clone(),
@@ -414,6 +470,7 @@ impl PipelineService {
                 scene_id: None,
                 stage: "render",
                 key: &key,
+                provider: "remotion",
                 model: "remotion",
             })
             .await?;
@@ -465,9 +522,10 @@ impl PipelineService {
             scene_id,
             stage,
             key,
+            provider,
             model,
         } = task;
-        info!(workflow_id = %workflow_id, project_id = %project_id, ?scene_id, stage, idempotency_key = key, model, "生成阶段开始");
+        info!(workflow_id = %workflow_id, project_id = %project_id, ?scene_id, stage, idempotency_key = key, provider, model, "生成阶段开始");
         self.repository
             .start_task(&NewGenerationTask {
                 id: Uuid::new_v4(),
@@ -479,7 +537,7 @@ impl PipelineService {
                 status: "running".into(),
                 attempt: 1,
                 idempotency_key: key.into(),
-                provider: Some(self.ai.name().into()),
+                provider: Some(provider.into()),
                 model: Some(model.into()),
                 input_hash: short_hash(key.as_bytes()),
             })
@@ -508,7 +566,17 @@ struct TaskDescriptor<'a> {
     scene_id: Option<Uuid>,
     stage: &'a str,
     key: &'a str,
+    provider: &'a str,
     model: &'a str,
+}
+
+/// 将素材来源和存储结果组合传递，避免图片、口播、字幕写入时混淆各自的 Provider。
+struct AssetDescriptor<'a> {
+    kind: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    object: &'a crate::storage::StoredObject,
+    metadata: Value,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

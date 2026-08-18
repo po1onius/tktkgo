@@ -83,6 +83,10 @@ impl Repository {
             aspect_ratio: request.aspect_ratio.database_value(),
             target_duration_seconds: request.target_duration_seconds,
             voice: &request.voice,
+            speech_provider: &request.speech_provider,
+            speech_model: &request.speech_model,
+            transcription_provider: &request.transcription_provider,
+            transcription_model: &request.transcription_model,
             require_script_review: request.require_script_review,
         };
         let mut conn = self.connection().await?;
@@ -91,7 +95,14 @@ impl Repository {
             .returning(Project::as_returning())
             .get_result(&mut conn)
             .await?;
-        info!(project_id = %id, "项目已创建");
+        info!(
+            project_id = %id,
+            speech_provider = request.speech_provider,
+            speech_model = request.speech_model,
+            transcription_provider = request.transcription_provider,
+            transcription_model = request.transcription_model,
+            "项目已创建"
+        );
         Ok(project)
     }
 
@@ -400,11 +411,24 @@ impl Repository {
 
     pub async fn insert_asset(&self, asset: &NewAsset) -> AppResult<AssetRecord> {
         let mut conn = self.connection().await?;
+        // 同一存储键重新生成时文件内容已经被覆盖，数据库必须同步新的 Provider、模型和校验和。
+        // 保留原记录 ID，避免 scenes 中已保存的素材 ID 失效。
         diesel::insert_into(assets::table)
             .values(asset)
             .on_conflict(assets::storage_key)
             .do_update()
-            .set(assets::storage_key.eq(diesel::upsert::excluded(assets::storage_key)))
+            .set((
+                assets::project_id.eq(diesel::upsert::excluded(assets::project_id)),
+                assets::scene_id.eq(diesel::upsert::excluded(assets::scene_id)),
+                assets::kind.eq(diesel::upsert::excluded(assets::kind)),
+                assets::provider.eq(diesel::upsert::excluded(assets::provider)),
+                assets::provider_asset_id.eq(diesel::upsert::excluded(assets::provider_asset_id)),
+                assets::public_url.eq(diesel::upsert::excluded(assets::public_url)),
+                assets::content_type.eq(diesel::upsert::excluded(assets::content_type)),
+                assets::byte_size.eq(diesel::upsert::excluded(assets::byte_size)),
+                assets::checksum.eq(diesel::upsert::excluded(assets::checksum)),
+                assets::metadata.eq(diesel::upsert::excluded(assets::metadata)),
+            ))
             .returning(AssetRecord::as_returning())
             .get_result(&mut conn)
             .await

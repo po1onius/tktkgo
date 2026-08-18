@@ -17,6 +17,8 @@ pub struct Settings {
     pub image_model: String,
     pub tts_model: String,
     pub transcribe_model: String,
+    pub cosyvoice_base_url: String,
+    pub faster_whisper_base_url: String,
 }
 
 impl Settings {
@@ -43,6 +45,14 @@ impl Settings {
             image_model: value("TKTKGO_IMAGE_MODEL", "gpt-image-2"),
             tts_model: value("TKTKGO_TTS_MODEL", "gpt-4o-mini-tts"),
             transcribe_model: value("TKTKGO_TRANSCRIBE_MODEL", "whisper-1"),
+            cosyvoice_base_url: trim_url(value(
+                "TKTKGO_COSYVOICE_BASE_URL",
+                "http://127.0.0.1:8101",
+            )),
+            faster_whisper_base_url: trim_url(value(
+                "TKTKGO_FASTER_WHISPER_BASE_URL",
+                "http://127.0.0.1:8102",
+            )),
         })
     }
 }

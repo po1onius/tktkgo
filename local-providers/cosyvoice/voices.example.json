@@ -1,0 +1,7 @@
+{
+  "coral": {
+    "prompt_text": "这是一段与参考音频内容完全一致的文字。",
+    "prompt_wav": "./voices/coral.wav",
+    "instruction": null
+  }
+}

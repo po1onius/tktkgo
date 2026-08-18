@@ -89,6 +89,28 @@ textarea {
   grid-template-columns: repeat(3, 1fr);
   gap: 16px;
 }
+.provider-settings {
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 18px;
+}
+.provider-settings legend {
+  padding: 0 8px;
+  color: #d8d3ff;
+  font-size: 14px;
+  font-weight: 750;
+}
+.provider-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+.provider-settings p {
+  margin: 12px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
 button,
 .download {
   border: 0;
@@ -218,6 +240,9 @@ button:disabled {
     padding-top: 40px;
   }
   .row {
+    grid-template-columns: 1fr;
+  }
+  .provider-row {
     grid-template-columns: 1fr;
   }
   .panel {

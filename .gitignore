@@ -11,4 +11,11 @@ render-output/
 *.mp4
 *.wav
 *.log
+__pycache__/
+*.py[cod]
 
+# 本地模型、Python 虚拟环境和私有音色样本体积较大，不纳入版本控制。
+local-providers/**/.venv/
+local-providers/cosyvoice/CosyVoice/
+local-providers/cosyvoice/voices/
+local-providers/cosyvoice/voices.json

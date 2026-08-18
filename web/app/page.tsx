@@ -12,6 +12,10 @@ type Project = {
   aspect_ratio: string;
   target_duration_seconds: number;
   voice: string;
+  speech_provider: string;
+  speech_model: string;
+  transcription_provider: string;
+  transcription_model: string;
   require_script_review: boolean;
   status: string;
   current_version: number;
@@ -26,6 +30,40 @@ type RenderRecord = {
   status: string;
   public_url: string | null;
   duration_ms: number | null;
+};
+
+type ProviderOption = {
+  id: string;
+  label: string;
+  model: string;
+  available: boolean;
+  voices: string[];
+};
+
+type ProviderCatalog = {
+  speech: ProviderOption[];
+  transcription: ProviderOption[];
+};
+
+const fallbackProviders: ProviderCatalog = {
+  speech: [
+    {
+      id: "openai",
+      label: "OpenAI",
+      model: "gpt-4o-mini-tts",
+      available: true,
+      voices: ["coral", "alloy", "sage"],
+    },
+  ],
+  transcription: [
+    {
+      id: "openai",
+      label: "OpenAI",
+      model: "whisper-1",
+      available: true,
+      voices: [],
+    },
+  ],
 };
 
 const statusLabel: Record<string, string> = {
@@ -47,6 +85,38 @@ export default function Home() {
   const [render, setRender] = useState<RenderRecord | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [providers, setProviders] =
+    useState<ProviderCatalog>(fallbackProviders);
+  const [speechProvider, setSpeechProvider] = useState("openai");
+  const [transcriptionProvider, setTranscriptionProvider] = useState("openai");
+  const [voice, setVoice] = useState("coral");
+
+  useEffect(() => {
+    void request<ProviderCatalog>("/v1/providers")
+      .then((catalog) => {
+        setProviders(catalog);
+        console.info("provider catalog loaded", { catalog });
+      })
+      .catch((cause) => {
+        // Provider 目录读取失败不妨碍使用默认 OpenAI，但保留日志用于排查本地服务。
+        console.error("load provider catalog failed", { cause });
+      });
+  }, []);
+
+  const selectedSpeech =
+    providers.speech.find((provider) => provider.id === speechProvider) ??
+    providers.speech[0];
+  const voices = selectedSpeech?.voices.length
+    ? selectedSpeech.voices
+    : fallbackProviders.speech[0].voices;
+  const selectedTranscription =
+    providers.transcription.find(
+      (provider) => provider.id === transcriptionProvider,
+    ) ?? providers.transcription[0];
+
+  useEffect(() => {
+    if (!voices.includes(voice)) setVoice(voices[0]);
+  }, [speechProvider, providers, voice, voices]);
 
   useEffect(() => {
     if (!project || ["completed", "failed", "draft"].includes(project.status))
@@ -97,6 +167,10 @@ export default function Home() {
           aspect_ratio: data.get("aspectRatio"),
           target_duration_seconds: Number(data.get("duration")),
           voice: data.get("voice"),
+          speech_provider: speechProvider,
+          speech_model: selectedSpeech.model,
+          transcription_provider: transcriptionProvider,
+          transcription_model: selectedTranscription.model,
           require_script_review: true,
           auto_start: true,
         }),
@@ -186,13 +260,67 @@ export default function Home() {
             </label>
             <label>
               口播声音
-              <select name="voice" defaultValue="coral">
-                <option value="coral">Coral</option>
-                <option value="alloy">Alloy</option>
-                <option value="sage">Sage</option>
+              <select
+                name="voice"
+                value={voice}
+                onChange={(event) => setVoice(event.target.value)}
+              >
+                {voices.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
               </select>
             </label>
           </div>
+          <fieldset className="provider-settings">
+            <legend>音频模型</legend>
+            <div className="provider-row">
+              <label>
+                口播 Provider
+                <select
+                  name="speechProvider"
+                  value={speechProvider}
+                  onChange={(event) => setSpeechProvider(event.target.value)}
+                >
+                  {providers.speech.map((provider) => (
+                    <option
+                      key={provider.id}
+                      value={provider.id}
+                      disabled={!provider.available}
+                    >
+                      {provider.label} · {provider.model}
+                      {provider.available ? "" : "（未启动）"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label>
+                字幕 Provider
+                <select
+                  name="transcriptionProvider"
+                  value={transcriptionProvider}
+                  onChange={(event) =>
+                    setTranscriptionProvider(event.target.value)
+                  }
+                >
+                  {providers.transcription.map((provider) => (
+                    <option
+                      key={provider.id}
+                      value={provider.id}
+                      disabled={!provider.available}
+                    >
+                      {provider.label} · {provider.model}
+                      {provider.available ? "" : "（未启动）"}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <p>
+              本地模型在第一次实际生成时才加载；未启动的 Provider 不可选择。
+            </p>
+          </fieldset>
           <button disabled={busy}>{busy ? "正在创建…" : "开始生成"}</button>
         </form>
       ) : (
@@ -220,6 +348,13 @@ export default function Home() {
             <span>版本 {project.current_version}</span>
             <span>{project.aspect_ratio}</span>
             <span>{project.target_duration_seconds} 秒</span>
+            <span>
+              口播 {project.speech_provider}/{project.speech_model}
+            </span>
+            <span>
+              字幕 {project.transcription_provider}/
+              {project.transcription_model}
+            </span>
           </div>
           {project.error_message ? (
             <div className="notice error">{project.error_message}</div>

@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -14,6 +14,10 @@ use crate::{
     domain::{CaptionCue, Project, ScriptSpec, StoryboardSpec},
 };
 
+mod local;
+
+pub use local::{CosyVoiceSpeechProvider, FasterWhisperTranscriptionProvider};
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ProviderUsage {
     pub request_id: Option<String>,
@@ -28,12 +32,17 @@ pub struct ProviderOutput<T> {
     pub usage: ProviderUsage,
 }
 
-#[async_trait]
-pub trait AiProvider: Send + Sync {
+/// 所有生成 Provider 的公共身份信息。
+///
+/// 能力接口不再绑定到同一个供应商：文本、图片、口播和转写可以分别注入不同实现。
+pub trait ProviderIdentity: Send + Sync {
     fn name(&self) -> &'static str;
-    fn text_model(&self) -> &str;
-    fn image_model(&self) -> &str;
-    fn tts_model(&self) -> &str;
+}
+
+#[async_trait]
+/// 生成强类型文稿和分镜的文本能力。
+pub trait TextProvider: ProviderIdentity {
+    fn model(&self) -> &str;
     async fn generate_script(
         &self,
         project: &Project,
@@ -45,24 +54,105 @@ pub trait AiProvider: Send + Sync {
         script: &ScriptSpec,
         request_id: Uuid,
     ) -> AppResult<ProviderOutput<StoryboardSpec>>;
+}
+
+#[async_trait]
+/// 生成场景插图的图片能力；当前 Pipeline 约定返回 PNG 字节。
+pub trait ImageProvider: ProviderIdentity {
+    fn model(&self) -> &str;
     async fn generate_image(
         &self,
         prompt: &str,
         portrait: bool,
         request_id: Uuid,
     ) -> AppResult<ProviderOutput<Vec<u8>>>;
+}
+
+#[async_trait]
+/// 将场景口播文本合成为音频；当前 Pipeline 约定返回可被 ffprobe 读取的 WAV 字节。
+pub trait SpeechProvider: ProviderIdentity {
     async fn synthesize_speech(
         &self,
         text: &str,
         voice: &str,
+        model: &str,
         request_id: Uuid,
     ) -> AppResult<ProviderOutput<Vec<u8>>>;
+}
+
+#[async_trait]
+/// 根据已生成的口播音频返回词级时间戳，用于构建确定性字幕时间线。
+pub trait TranscriptionProvider: ProviderIdentity {
     async fn align_speech(
         &self,
         audio: Vec<u8>,
         canonical_text: &str,
+        model: &str,
         request_id: Uuid,
     ) -> AppResult<ProviderOutput<Vec<CaptionCue>>>;
+}
+
+/// Pipeline 使用的 Provider 集合。
+///
+/// 该结构是编排层唯一依赖的能力入口。替换某一种能力时，不需要修改工作流和其他 Provider。
+#[derive(Clone)]
+pub struct GenerationProviders {
+    text: Arc<dyn TextProvider>,
+    image: Arc<dyn ImageProvider>,
+    openai_speech: Arc<dyn SpeechProvider>,
+    cosyvoice_speech: Arc<dyn SpeechProvider>,
+    openai_transcription: Arc<dyn TranscriptionProvider>,
+    faster_whisper_transcription: Arc<dyn TranscriptionProvider>,
+}
+
+impl GenerationProviders {
+    pub fn new(
+        text: Arc<dyn TextProvider>,
+        image: Arc<dyn ImageProvider>,
+        openai_speech: Arc<dyn SpeechProvider>,
+        cosyvoice_speech: Arc<dyn SpeechProvider>,
+        openai_transcription: Arc<dyn TranscriptionProvider>,
+        faster_whisper_transcription: Arc<dyn TranscriptionProvider>,
+    ) -> Self {
+        Self {
+            text,
+            image,
+            openai_speech,
+            cosyvoice_speech,
+            openai_transcription,
+            faster_whisper_transcription,
+        }
+    }
+
+    pub fn text(&self) -> &dyn TextProvider {
+        self.text.as_ref()
+    }
+
+    pub fn image(&self) -> &dyn ImageProvider {
+        self.image.as_ref()
+    }
+
+    /// 根据项目保存的选择解析口播实现。未知值必须直接失败，避免静默换用其他供应商。
+    pub fn speech(&self, provider: &str) -> AppResult<&dyn SpeechProvider> {
+        match provider {
+            "openai" => Ok(self.openai_speech.as_ref()),
+            "cosyvoice" => Ok(self.cosyvoice_speech.as_ref()),
+            value => Err(AppError::Config(format!(
+                "项目配置了不支持的口播 Provider: {value}"
+            ))),
+        }
+    }
+
+    /// 根据项目保存的选择解析字幕实现。
+    pub fn transcription(&self, provider: &str) -> AppResult<&dyn TranscriptionProvider> {
+        match provider {
+            "openai" => Ok(self.openai_transcription.as_ref()),
+            "faster-whisper" => Ok(self.faster_whisper_transcription.as_ref()),
+            value => Err(AppError::Config(format!(
+                "项目配置了不支持的字幕 Provider: {value}"
+            ))),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -72,8 +162,6 @@ pub struct OpenAiProvider {
     api_key: String,
     text_model: String,
     image_model: String,
-    tts_model: String,
-    transcribe_model: String,
 }
 
 impl OpenAiProvider {
@@ -88,8 +176,6 @@ impl OpenAiProvider {
             api_key: settings.openai_api_key.clone(),
             text_model: settings.text_model.clone(),
             image_model: settings.image_model.clone(),
-            tts_model: settings.tts_model.clone(),
-            transcribe_model: settings.transcribe_model.clone(),
         })
     }
 
@@ -149,19 +235,16 @@ impl OpenAiProvider {
     }
 }
 
-#[async_trait]
-impl AiProvider for OpenAiProvider {
+impl ProviderIdentity for OpenAiProvider {
     fn name(&self) -> &'static str {
         "openai"
     }
-    fn text_model(&self) -> &str {
+}
+
+#[async_trait]
+impl TextProvider for OpenAiProvider {
+    fn model(&self) -> &str {
         &self.text_model
-    }
-    fn image_model(&self) -> &str {
-        &self.image_model
-    }
-    fn tts_model(&self) -> &str {
-        &self.tts_model
     }
 
     #[instrument(skip(self, project), fields(project_id = %project.id, model = %self.text_model))]
@@ -197,6 +280,13 @@ impl AiProvider for OpenAiProvider {
         );
         self.structured(system, user, "video_storyboard", request_id)
             .await
+    }
+}
+
+#[async_trait]
+impl ImageProvider for OpenAiProvider {
+    fn model(&self) -> &str {
+        &self.image_model
     }
 
     #[instrument(skip(self, prompt), fields(model = %self.image_model, portrait, request_id = %request_id))]
@@ -250,18 +340,22 @@ impl AiProvider for OpenAiProvider {
             },
         })
     }
+}
 
-    #[instrument(skip(self, text), fields(model = %self.tts_model, request_id = %request_id, text_chars = text.chars().count()))]
+#[async_trait]
+impl SpeechProvider for OpenAiProvider {
+    #[instrument(skip(self, text), fields(model, request_id = %request_id, text_chars = text.chars().count()))]
     async fn synthesize_speech(
         &self,
         text: &str,
         voice: &str,
+        model: &str,
         request_id: Uuid,
     ) -> AppResult<ProviderOutput<Vec<u8>>> {
         let started = Instant::now();
         let response = self.client.post(format!("{}/audio/speech", self.base_url))
             .bearer_auth(&self.api_key).header("X-Client-Request-Id", request_id.to_string())
-            .json(&json!({"model": self.tts_model, "voice": voice, "input": text, "response_format": "wav", "instructions": "自然、清晰、有亲和力的专业中文口播，停顿适中。"}))
+            .json(&json!({"model": model, "voice": voice, "input": text, "response_format": "wav", "instructions": "自然、清晰、有亲和力的专业中文口播，停顿适中。"}))
             .send().await.map_err(|err| AppError::external("openai", err.to_string()))?;
         let provider_request_id = response
             .headers()
@@ -289,12 +383,16 @@ impl AiProvider for OpenAiProvider {
             },
         })
     }
+}
 
-    #[instrument(skip(self, audio, canonical_text), fields(model = %self.transcribe_model, request_id = %request_id, audio_bytes = audio.len()))]
+#[async_trait]
+impl TranscriptionProvider for OpenAiProvider {
+    #[instrument(skip(self, audio, canonical_text), fields(model, request_id = %request_id, audio_bytes = audio.len()))]
     async fn align_speech(
         &self,
         audio: Vec<u8>,
         canonical_text: &str,
+        model: &str,
         request_id: Uuid,
     ) -> AppResult<ProviderOutput<Vec<CaptionCue>>> {
         let started = Instant::now();
@@ -303,7 +401,7 @@ impl AiProvider for OpenAiProvider {
             .mime_str("audio/wav")
             .map_err(|err| AppError::external("openai", err.to_string()))?;
         let form = multipart::Form::new()
-            .text("model", self.transcribe_model.clone())
+            .text("model", model.to_owned())
             .text("response_format", "verbose_json")
             .text("timestamp_granularities[]", "word")
             .text("prompt", canonical_text.to_owned())

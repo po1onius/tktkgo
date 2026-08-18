@@ -44,6 +44,14 @@ pub struct CreateProjectRequest {
     pub target_duration_seconds: i32,
     #[serde(default = "default_voice")]
     pub voice: String,
+    #[serde(default = "default_speech_provider")]
+    pub speech_provider: String,
+    #[serde(default = "default_speech_model")]
+    pub speech_model: String,
+    #[serde(default = "default_transcription_provider")]
+    pub transcription_provider: String,
+    #[serde(default = "default_transcription_model")]
+    pub transcription_model: String,
     #[serde(default = "default_review")]
     pub require_script_review: bool,
     #[serde(default = "default_auto_start")]
@@ -65,6 +73,31 @@ impl CreateProjectRequest {
                 "目标时长必须在 10 到 3600 秒之间".into(),
             ));
         }
+        if !matches!(self.speech_provider.as_str(), "openai" | "cosyvoice") {
+            return Err(AppError::Validation(format!(
+                "不支持的口播 Provider: {}",
+                self.speech_provider
+            )));
+        }
+        if !matches!(
+            self.transcription_provider.as_str(),
+            "openai" | "faster-whisper"
+        ) {
+            return Err(AppError::Validation(format!(
+                "不支持的字幕 Provider: {}",
+                self.transcription_provider
+            )));
+        }
+        for (label, model) in [
+            ("口播模型", self.speech_model.as_str()),
+            ("字幕模型", self.transcription_model.as_str()),
+        ] {
+            if model.trim().is_empty() || model.chars().count() > 128 {
+                return Err(AppError::Validation(format!(
+                    "{label}必须为 1 到 128 个字符"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -80,6 +113,18 @@ fn default_duration() -> i32 {
 }
 fn default_voice() -> String {
     "coral".into()
+}
+fn default_speech_provider() -> String {
+    "openai".into()
+}
+fn default_speech_model() -> String {
+    "gpt-4o-mini-tts".into()
+}
+fn default_transcription_provider() -> String {
+    "openai".into()
+}
+fn default_transcription_model() -> String {
+    "whisper-1".into()
 }
 fn default_review() -> bool {
     true
@@ -99,6 +144,10 @@ pub struct Project {
     pub aspect_ratio: String,
     pub target_duration_seconds: i32,
     pub voice: String,
+    pub speech_provider: String,
+    pub speech_model: String,
+    pub transcription_provider: String,
+    pub transcription_model: String,
     pub require_script_review: bool,
     pub status: String,
     pub active_workflow_id: Option<Uuid>,
@@ -118,6 +167,10 @@ pub struct NewProject<'a> {
     pub aspect_ratio: &'a str,
     pub target_duration_seconds: i32,
     pub voice: &'a str,
+    pub speech_provider: &'a str,
+    pub speech_model: &'a str,
+    pub transcription_provider: &'a str,
+    pub transcription_model: &'a str,
     pub require_script_review: bool,
 }
 

@@ -6,6 +6,10 @@ CREATE TABLE projects (
     aspect_ratio VARCHAR(16) NOT NULL,
     target_duration_seconds INTEGER NOT NULL,
     voice VARCHAR(64) NOT NULL,
+    speech_provider VARCHAR(64) NOT NULL DEFAULT 'openai',
+    speech_model VARCHAR(128) NOT NULL DEFAULT 'gpt-4o-mini-tts',
+    transcription_provider VARCHAR(64) NOT NULL DEFAULT 'openai',
+    transcription_model VARCHAR(128) NOT NULL DEFAULT 'whisper-1',
     require_script_review BOOLEAN NOT NULL DEFAULT TRUE,
     status VARCHAR(32) NOT NULL DEFAULT 'draft',
     active_workflow_id UUID,
@@ -15,6 +19,10 @@ CREATE TABLE projects (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (target_duration_seconds BETWEEN 10 AND 3600),
     CHECK (aspect_ratio IN ('16:9', '9:16', '1:1')),
+    CHECK (speech_provider IN ('openai', 'cosyvoice')),
+    CHECK (speech_model <> ''),
+    CHECK (transcription_provider IN ('openai', 'faster-whisper')),
+    CHECK (transcription_model <> ''),
     CHECK (status IN ('draft', 'queued', 'generating_script', 'waiting_script_review', 'generating_storyboard', 'generating_assets', 'building_timeline', 'rendering', 'completed', 'failed'))
 );
 CREATE INDEX idx_projects_status_updated_at ON projects (status, updated_at DESC);

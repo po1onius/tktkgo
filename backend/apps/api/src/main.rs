@@ -21,7 +21,7 @@ use tower_http::{
     services::ServeDir,
     trace::TraceLayer,
 };
-use tracing::{info, instrument};
+use tracing::{info, instrument, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -29,6 +29,7 @@ use uuid::Uuid;
 struct ApiState {
     repository: Repository,
     http: Client,
+    provider_http: Client,
     settings: Settings,
 }
 
@@ -41,12 +42,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(ApiState {
         repository,
         http: Client::new(),
+        provider_http: Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()?,
         settings: settings.clone(),
     });
 
     let request_id_header = HeaderName::from_static("x-request-id");
     let app = Router::new()
         .route("/health", get(health))
+        .route("/v1/providers", get(list_providers))
         .route("/v1/projects", post(create_project))
         .route("/v1/projects/{project_id}", get(get_project))
         .route("/v1/projects/{project_id}/scenes", get(list_scenes))
@@ -93,11 +98,133 @@ async fn health() -> Json<serde_json::Value> {
     Json(json!({"status": "ok", "service": "api"}))
 }
 
+#[derive(Serialize)]
+struct ProviderCatalog {
+    speech: Vec<ProviderOption>,
+    transcription: Vec<ProviderOption>,
+}
+
+#[derive(Serialize)]
+struct ProviderOption {
+    id: &'static str,
+    label: &'static str,
+    model: String,
+    available: bool,
+    voices: Vec<String>,
+}
+
+/// 返回当前部署实际可用的 Provider。前端只负责选择，不接触 API Key、服务地址或本地路径。
+async fn list_providers(State(state): State<Arc<ApiState>>) -> Json<ProviderCatalog> {
+    let (cosyvoice, faster_whisper) = tokio::join!(
+        probe_provider(
+            &state.provider_http,
+            &state.settings.cosyvoice_base_url,
+            "cosyvoice"
+        ),
+        probe_provider(
+            &state.provider_http,
+            &state.settings.faster_whisper_base_url,
+            "faster-whisper"
+        )
+    );
+    let cosyvoice_voices: Vec<String> = cosyvoice
+        .as_ref()
+        .and_then(|health| health.get("voices"))
+        .and_then(serde_json::Value::as_array)
+        .map(|voices| {
+            voices
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let cosyvoice_model = health_model(cosyvoice.as_ref()).unwrap_or_default();
+    let faster_whisper_model = health_model(faster_whisper.as_ref()).unwrap_or_default();
+    let cosyvoice_available = !cosyvoice_model.is_empty() && !cosyvoice_voices.is_empty();
+    let faster_whisper_available = !faster_whisper_model.is_empty();
+    Json(ProviderCatalog {
+        speech: vec![
+            ProviderOption {
+                id: "openai",
+                label: "OpenAI",
+                model: state.settings.tts_model.clone(),
+                available: true,
+                voices: vec!["coral".into(), "alloy".into(), "sage".into()],
+            },
+            ProviderOption {
+                id: "cosyvoice",
+                label: "CosyVoice 3（本地）",
+                model: cosyvoice_model,
+                available: cosyvoice_available,
+                voices: cosyvoice_voices,
+            },
+        ],
+        transcription: vec![
+            ProviderOption {
+                id: "openai",
+                label: "OpenAI",
+                model: state.settings.transcribe_model.clone(),
+                available: true,
+                voices: Vec::new(),
+            },
+            ProviderOption {
+                id: "faster-whisper",
+                label: "faster-whisper（本地）",
+                model: faster_whisper_model,
+                available: faster_whisper_available,
+                voices: Vec::new(),
+            },
+        ],
+    })
+}
+
+fn health_model(health: Option<&serde_json::Value>) -> Option<String> {
+    health?
+        .get("model")?
+        .as_str()
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+}
+
+async fn probe_provider(
+    client: &Client,
+    base_url: &str,
+    provider: &'static str,
+) -> Option<serde_json::Value> {
+    let result = async {
+        let response = client.get(format!("{base_url}/health")).send().await?;
+        response
+            .error_for_status()?
+            .json::<serde_json::Value>()
+            .await
+    }
+    .await;
+    match result {
+        Ok(health)
+            if health.get("status").and_then(serde_json::Value::as_str) == Some("ok")
+                && health.get("provider").and_then(serde_json::Value::as_str) == Some(provider) =>
+        {
+            Some(health)
+        }
+        Ok(health) => {
+            warn!(provider, response = %health, "本地 Provider 健康响应不符合协议");
+            None
+        }
+        Err(error) => {
+            warn!(provider, %error, "本地 Provider 当前不可用");
+            None
+        }
+    }
+}
+
 #[instrument(skip(state, request), fields(title = %request.title))]
 async fn create_project(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateProjectRequest>,
 ) -> Result<(StatusCode, Json<Project>), ApiError> {
+    request.validate()?;
+    ensure_requested_providers_available(&state, &request).await?;
     let auto_start = request.auto_start;
     let project = state.repository.create_project(&request).await?;
     if auto_start {
@@ -105,6 +232,69 @@ async fn create_project(
     }
     let project = state.repository.get_project(project.id).await?;
     Ok((StatusCode::CREATED, Json(project)))
+}
+
+async fn ensure_requested_providers_available(
+    state: &ApiState,
+    request: &CreateProjectRequest,
+) -> Result<(), ApiError> {
+    match request.speech_provider.as_str() {
+        "openai" if request.speech_model != state.settings.tts_model => {
+            return Err(AppError::Validation(format!(
+                "OpenAI 口播模型必须是 {}",
+                state.settings.tts_model
+            ))
+            .into());
+        }
+        "cosyvoice" => {
+            let health = probe_provider(
+                &state.provider_http,
+                &state.settings.cosyvoice_base_url,
+                "cosyvoice",
+            )
+            .await
+            .ok_or_else(|| AppError::Conflict("CosyVoice Provider 当前不可用".into()))?;
+            ensure_model_matches("CosyVoice", &request.speech_model, &health)?;
+        }
+        _ => {}
+    }
+    match request.transcription_provider.as_str() {
+        "openai" if request.transcription_model != state.settings.transcribe_model => {
+            return Err(AppError::Validation(format!(
+                "OpenAI 字幕模型必须是 {}",
+                state.settings.transcribe_model
+            ))
+            .into());
+        }
+        "faster-whisper" => {
+            let health = probe_provider(
+                &state.provider_http,
+                &state.settings.faster_whisper_base_url,
+                "faster-whisper",
+            )
+            .await
+            .ok_or_else(|| AppError::Conflict("faster-whisper Provider 当前不可用".into()))?;
+            ensure_model_matches("faster-whisper", &request.transcription_model, &health)?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn ensure_model_matches(
+    provider: &str,
+    requested_model: &str,
+    health: &serde_json::Value,
+) -> Result<(), ApiError> {
+    let running_model = health_model(Some(health))
+        .ok_or_else(|| AppError::Conflict(format!("{provider} 未报告当前模型")))?;
+    if requested_model != running_model {
+        return Err(AppError::Conflict(format!(
+            "{provider} 当前运行模型为 {running_model}，请求模型为 {requested_model}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 async fn get_project(

@@ -5,7 +5,10 @@ use tktkgo_app::{
     Repository, Settings, create_pool,
     domain::{ScriptReviewInput, WorkflowInput, WorkflowResult},
     pipeline::PipelineService,
-    providers::OpenAiProvider,
+    providers::{
+        CosyVoiceSpeechProvider, FasterWhisperTranscriptionProvider, GenerationProviders,
+        OpenAiProvider,
+    },
     render::RenderClient,
     run_migrations,
     storage::LocalAssetStore,
@@ -375,7 +378,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::from_env()?;
     run_migrations(settings.database_url.clone()).await?;
     let repository = Repository::new(create_pool(&settings.database_url).await?);
-    let ai = Arc::new(OpenAiProvider::new(&settings)?);
+    let openai = Arc::new(OpenAiProvider::new(&settings)?);
+    let cosyvoice = Arc::new(CosyVoiceSpeechProvider::new(&settings)?);
+    let faster_whisper = Arc::new(FasterWhisperTranscriptionProvider::new(&settings)?);
+    // 注册所有实现；真正的口播和字幕选择来自每个项目的前端配置。
+    let providers = GenerationProviders::new(
+        openai.clone(),
+        openai.clone(),
+        openai.clone(),
+        cosyvoice.clone(),
+        openai,
+        faster_whisper.clone(),
+    );
+    info!(
+        text_provider = providers.text().name(),
+        text_model = providers.text().model(),
+        image_provider = providers.image().name(),
+        image_model = providers.image().model(),
+        "生成 Provider 注册表初始化完成"
+    );
     let storage = Arc::new(
         LocalAssetStore::new(
             settings.asset_root.clone(),
@@ -386,7 +407,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let renderer = RenderClient::new(settings.renderer_url.clone());
     let pipeline = PipelineService::new(
         repository,
-        ai,
+        providers,
         storage,
         renderer,
         settings.asset_root.clone(),
