@@ -22,14 +22,6 @@ impl AspectRatio {
             Self::Square => "1:1",
         }
     }
-
-    pub fn dimensions(&self) -> (i32, i32) {
-        match self {
-            Self::Landscape => (1920, 1080),
-            Self::Portrait => (1080, 1920),
-            Self::Square => (1080, 1080),
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -42,15 +34,14 @@ pub struct CreateProjectRequest {
     pub aspect_ratio: AspectRatio,
     #[serde(default = "default_duration")]
     pub target_duration_seconds: i32,
-    #[serde(default = "default_voice")]
+    pub text_provider: String,
+    pub text_model: String,
+    pub image_provider: String,
+    pub image_model: String,
     pub voice: String,
-    #[serde(default = "default_speech_provider")]
     pub speech_provider: String,
-    #[serde(default = "default_speech_model")]
     pub speech_model: String,
-    #[serde(default = "default_transcription_provider")]
     pub transcription_provider: String,
-    #[serde(default = "default_transcription_model")]
     pub transcription_model: String,
     #[serde(default = "default_review")]
     pub require_script_review: bool,
@@ -73,22 +64,24 @@ impl CreateProjectRequest {
                 "目标时长必须在 10 到 3600 秒之间".into(),
             ));
         }
-        if !matches!(self.speech_provider.as_str(), "openai" | "cosyvoice") {
-            return Err(AppError::Validation(format!(
-                "不支持的口播 Provider: {}",
-                self.speech_provider
-            )));
+        if self.voice.trim().is_empty() || self.voice.chars().count() > 64 {
+            return Err(AppError::Validation("口播音色必须为 1 到 64 个字符".into()));
         }
-        if !matches!(
-            self.transcription_provider.as_str(),
-            "openai" | "faster-whisper"
-        ) {
-            return Err(AppError::Validation(format!(
-                "不支持的字幕 Provider: {}",
-                self.transcription_provider
-            )));
+        for (label, provider) in [
+            ("文案 Provider", self.text_provider.as_str()),
+            ("图片 Provider", self.image_provider.as_str()),
+            ("口播 Provider", self.speech_provider.as_str()),
+            ("字幕 Provider", self.transcription_provider.as_str()),
+        ] {
+            if provider.trim().is_empty() || provider.chars().count() > 64 {
+                return Err(AppError::Validation(format!(
+                    "{label}必须为 1 到 64 个字符"
+                )));
+            }
         }
         for (label, model) in [
+            ("文案模型", self.text_model.as_str()),
+            ("图片模型", self.image_model.as_str()),
             ("口播模型", self.speech_model.as_str()),
             ("字幕模型", self.transcription_model.as_str()),
         ] {
@@ -111,21 +104,6 @@ fn default_aspect_ratio() -> AspectRatio {
 fn default_duration() -> i32 {
     180
 }
-fn default_voice() -> String {
-    "coral".into()
-}
-fn default_speech_provider() -> String {
-    "openai".into()
-}
-fn default_speech_model() -> String {
-    "gpt-4o-mini-tts".into()
-}
-fn default_transcription_provider() -> String {
-    "openai".into()
-}
-fn default_transcription_model() -> String {
-    "whisper-1".into()
-}
 fn default_review() -> bool {
     true
 }
@@ -143,6 +121,10 @@ pub struct Project {
     pub language: String,
     pub aspect_ratio: String,
     pub target_duration_seconds: i32,
+    pub text_provider: String,
+    pub text_model: String,
+    pub image_provider: String,
+    pub image_model: String,
     pub voice: String,
     pub speech_provider: String,
     pub speech_model: String,
@@ -166,6 +148,10 @@ pub struct NewProject<'a> {
     pub language: &'a str,
     pub aspect_ratio: &'a str,
     pub target_duration_seconds: i32,
+    pub text_provider: &'a str,
+    pub text_model: &'a str,
+    pub image_provider: &'a str,
+    pub image_model: &'a str,
     pub voice: &'a str,
     pub speech_provider: &'a str,
     pub speech_model: &'a str,
@@ -220,7 +206,6 @@ pub struct StoryboardSpec {
 pub struct StyleBible {
     pub art_direction: String,
     pub color_palette: Vec<String>,
-    pub typography: String,
     pub image_rules: Vec<String>,
     pub negative_prompt: String,
 }
@@ -230,21 +215,10 @@ pub struct StyleBible {
 pub struct SceneDraft {
     pub sequence: i32,
     pub narration: String,
-    pub visual_type: VisualType,
     pub visual_prompt: String,
     #[schemars(required)]
     pub on_screen_text: Option<String>,
     pub transition: TransitionKind,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum VisualType {
-    Illustration,
-    Infographic,
-    Quote,
-    Title,
-    List,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -254,6 +228,17 @@ pub enum TransitionKind {
     Slide,
     Wipe,
     None,
+}
+
+impl TransitionKind {
+    pub fn database_value(&self) -> &'static str {
+        match self {
+            Self::Fade => "fade",
+            Self::Slide => "slide",
+            Self::Wipe => "wipe",
+            Self::None => "none",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -280,8 +265,6 @@ pub struct RenderScene {
     pub sequence: i32,
     pub start_frame: i64,
     pub duration_in_frames: i64,
-    pub narration: String,
-    pub visual_type: VisualType,
     pub image_url: String,
     pub audio_url: String,
     pub on_screen_text: Option<String>,

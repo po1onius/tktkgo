@@ -5,10 +5,7 @@ use tktkgo_app::{
     Repository, Settings, create_pool,
     domain::{ScriptReviewInput, WorkflowInput, WorkflowResult},
     pipeline::PipelineService,
-    providers::{
-        CosyVoiceSpeechProvider, FasterWhisperTranscriptionProvider, GenerationProviders,
-        OpenAiProvider,
-    },
+    providers::ModelGatewayClient,
     render::RenderClient,
     run_migrations,
     storage::LocalAssetStore,
@@ -54,6 +51,7 @@ impl VideoGenerationWorkflow {
             &ctx,
             self.pipeline.repository().clone(),
             project.id,
+            workflow_id,
             "generating_script",
             None,
         )
@@ -91,8 +89,14 @@ impl VideoGenerationWorkflow {
         {
             Ok(Json(script)) => script,
             Err(err) => {
-                return fail_workflow(&ctx, self.pipeline.repository().clone(), project.id, err)
-                    .await;
+                return fail_workflow(
+                    &ctx,
+                    self.pipeline.repository().clone(),
+                    project.id,
+                    workflow_id,
+                    err,
+                )
+                .await;
             }
         };
 
@@ -101,6 +105,7 @@ impl VideoGenerationWorkflow {
                 &ctx,
                 self.pipeline.repository().clone(),
                 project.id,
+                workflow_id,
                 "waiting_script_review",
                 None,
             )
@@ -115,6 +120,7 @@ impl VideoGenerationWorkflow {
                     &ctx,
                     self.pipeline.repository().clone(),
                     project.id,
+                    workflow_id,
                     "draft",
                     Some(reason.clone()),
                 )
@@ -133,6 +139,7 @@ impl VideoGenerationWorkflow {
             &ctx,
             self.pipeline.repository().clone(),
             project.id,
+            workflow_id,
             "generating_storyboard",
             None,
         )
@@ -154,8 +161,14 @@ impl VideoGenerationWorkflow {
         {
             Ok(Json(storyboard)) => storyboard,
             Err(err) => {
-                return fail_workflow(&ctx, self.pipeline.repository().clone(), project.id, err)
-                    .await;
+                return fail_workflow(
+                    &ctx,
+                    self.pipeline.repository().clone(),
+                    project.id,
+                    workflow_id,
+                    err,
+                )
+                .await;
             }
         };
 
@@ -163,6 +176,7 @@ impl VideoGenerationWorkflow {
             &ctx,
             self.pipeline.repository().clone(),
             project.id,
+            workflow_id,
             "generating_assets",
             None,
         )
@@ -180,49 +194,46 @@ impl VideoGenerationWorkflow {
             .name("load-scenes")
             .retry_policy(database_retry())
             .await?;
-        let mut generated = Vec::with_capacity(scenes.len());
-        for scene in scenes {
-            let pipeline = self.pipeline.clone();
-            let scene_project = project.clone();
-            let scene_version = version.clone();
-            let style = storyboard.style_bible.clone();
-            let stage_name = format!("generate-scene-{}", scene.sequence);
-            let output = match ctx
-                .run(move || async move {
-                    pipeline
-                        .generate_scene_assets(
-                            workflow_id,
-                            &scene_project,
-                            &scene_version,
-                            &scene,
-                            &style,
-                        )
-                        .await
-                        .map(Json)
-                        .map_err(HandlerError::from)
-                })
-                .name(stage_name)
-                .retry_policy(external_retry())
-                .await
-            {
-                Ok(Json(output)) => output,
-                Err(err) => {
-                    return fail_workflow(
-                        &ctx,
-                        self.pipeline.repository().clone(),
-                        project.id,
-                        err,
+        let pipeline = self.pipeline.clone();
+        let scene_project = project.clone();
+        let scene_version = version.clone();
+        let style = storyboard.style_bible.clone();
+        let generated = match ctx
+            .run(move || async move {
+                pipeline
+                    .generate_all_scene_assets(
+                        workflow_id,
+                        scene_project,
+                        scene_version,
+                        scenes,
+                        style,
                     )
-                    .await;
-                }
-            };
-            generated.push(output);
-        }
+                    .await
+                    .map(Json)
+                    .map_err(HandlerError::from)
+            })
+            .name("generate-scene-assets")
+            .retry_policy(external_retry())
+            .await
+        {
+            Ok(Json(output)) => output,
+            Err(err) => {
+                return fail_workflow(
+                    &ctx,
+                    self.pipeline.repository().clone(),
+                    project.id,
+                    workflow_id,
+                    err,
+                )
+                .await;
+            }
+        };
 
         set_status(
             &ctx,
             self.pipeline.repository().clone(),
             project.id,
+            workflow_id,
             "building_timeline",
             None,
         )
@@ -248,6 +259,7 @@ impl VideoGenerationWorkflow {
             &ctx,
             self.pipeline.repository().clone(),
             project.id,
+            workflow_id,
             "rendering",
             None,
         )
@@ -268,8 +280,14 @@ impl VideoGenerationWorkflow {
         {
             Ok(url) => url,
             Err(err) => {
-                return fail_workflow(&ctx, self.pipeline.repository().clone(), project.id, err)
-                    .await;
+                return fail_workflow(
+                    &ctx,
+                    self.pipeline.repository().clone(),
+                    project.id,
+                    workflow_id,
+                    err,
+                )
+                .await;
             }
         };
 
@@ -277,6 +295,7 @@ impl VideoGenerationWorkflow {
             &ctx,
             self.pipeline.repository().clone(),
             project.id,
+            workflow_id,
             "completed",
             None,
         )
@@ -310,14 +329,22 @@ async fn set_status(
     ctx: &WorkflowContext<'_>,
     repository: Repository,
     project_id: Uuid,
+    workflow_id: Uuid,
     status: &'static str,
     error_message: Option<String>,
 ) -> Result<(), TerminalError> {
     ctx.run(move || async move {
-        repository
-            .update_project_status(project_id, status, error_message.as_deref())
-            .await
-            .map_err(HandlerError::from)
+        if matches!(status, "draft" | "failed" | "completed") {
+            repository
+                .finalize_project(project_id, workflow_id, status, error_message.as_deref())
+                .await
+                .map_err(HandlerError::from)
+        } else {
+            repository
+                .update_project_status(project_id, workflow_id, status, error_message.as_deref())
+                .await
+                .map_err(HandlerError::from)
+        }
     })
     .name(format!("status-{status}"))
     .retry_policy(database_retry())
@@ -328,6 +355,7 @@ async fn fail_workflow(
     ctx: &WorkflowContext<'_>,
     repository: Repository,
     project_id: Uuid,
+    workflow_id: Uuid,
     cause: TerminalError,
 ) -> HandlerResult<Json<WorkflowResult>> {
     let message = cause.to_string();
@@ -335,7 +363,7 @@ async fn fail_workflow(
     let saved_message = message.clone();
     ctx.run(move || async move {
         repository
-            .update_project_status(project_id, "failed", Some(&saved_message))
+            .finalize_project(project_id, workflow_id, "failed", Some(&saved_message))
             .await
             .map_err(HandlerError::from)
     })
@@ -378,24 +406,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::from_env()?;
     run_migrations(settings.database_url.clone()).await?;
     let repository = Repository::new(create_pool(&settings.database_url).await?);
-    let openai = Arc::new(OpenAiProvider::new(&settings)?);
-    let cosyvoice = Arc::new(CosyVoiceSpeechProvider::new(&settings)?);
-    let faster_whisper = Arc::new(FasterWhisperTranscriptionProvider::new(&settings)?);
-    // 注册所有实现；真正的口播和字幕选择来自每个项目的前端配置。
-    let providers = GenerationProviders::new(
-        openai.clone(),
-        openai.clone(),
-        openai.clone(),
-        cosyvoice.clone(),
-        openai,
-        faster_whisper.clone(),
-    );
+    // Workflow 只依赖固定的 Model Gateway 协议，不包含任何模型厂商 SDK 或私有参数。
+    let gateway = ModelGatewayClient::new(&settings)?;
     info!(
-        text_provider = providers.text().name(),
-        text_model = providers.text().model(),
-        image_provider = providers.image().name(),
-        image_model = providers.image().model(),
-        "生成 Provider 注册表初始化完成"
+        model_gateway_url = settings.model_gateway_url,
+        "固定模型能力客户端初始化完成"
     );
     let storage = Arc::new(
         LocalAssetStore::new(
@@ -407,7 +422,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let renderer = RenderClient::new(settings.renderer_url.clone());
     let pipeline = PipelineService::new(
         repository,
-        providers,
+        gateway,
         storage,
         renderer,
         settings.asset_root.clone(),

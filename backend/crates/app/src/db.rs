@@ -12,7 +12,7 @@ use diesel_async::{
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use serde::Serialize;
 use serde_json::Value;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
@@ -82,6 +82,10 @@ impl Repository {
             language: &request.language,
             aspect_ratio: request.aspect_ratio.database_value(),
             target_duration_seconds: request.target_duration_seconds,
+            text_provider: &request.text_provider,
+            text_model: &request.text_model,
+            image_provider: &request.image_provider,
+            image_model: &request.image_model,
             voice: &request.voice,
             speech_provider: &request.speech_provider,
             speech_model: &request.speech_model,
@@ -97,6 +101,10 @@ impl Repository {
             .await?;
         info!(
             project_id = %id,
+            text_provider = request.text_provider,
+            text_model = request.text_model,
+            image_provider = request.image_provider,
+            image_model = request.image_model,
             speech_provider = request.speech_provider,
             speech_model = request.speech_model,
             transcription_provider = request.transcription_provider,
@@ -120,40 +128,91 @@ impl Repository {
     pub async fn update_project_status(
         &self,
         project_id: Uuid,
+        workflow_id: Uuid,
         status: &str,
         error_message: Option<&str>,
     ) -> AppResult<()> {
         let mut conn = self.connection().await?;
-        let affected = diesel::update(projects::table.find(project_id))
-            .set((
-                projects::status.eq(status),
-                projects::error_message.eq(error_message),
-                projects::updated_at.eq(Utc::now()),
-            ))
-            .execute(&mut conn)
-            .await?;
+        // 每次状态变更都绑定活动工作流，防止已经终止的旧工作流覆盖新版本的状态。
+        let affected = diesel::update(
+            projects::table
+                .filter(projects::id.eq(project_id))
+                .filter(projects::active_workflow_id.eq(Some(workflow_id))),
+        )
+        .set((
+            projects::status.eq(status),
+            projects::error_message.eq(error_message),
+            projects::updated_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await?;
         if affected == 0 {
-            return Err(AppError::NotFound(format!("项目 {project_id}")));
+            return Err(AppError::Conflict(format!(
+                "工作流 {workflow_id} 已不是项目 {project_id} 的活动工作流"
+            )));
         }
-        info!(project_id = %project_id, status, "项目状态已更新");
+        info!(project_id = %project_id, workflow_id = %workflow_id, status, "项目状态已更新");
         Ok(())
     }
 
     pub async fn queue_project(&self, project_id: Uuid, workflow_id: Uuid) -> AppResult<()> {
         let mut conn = self.connection().await?;
-        let affected = diesel::update(projects::table.find(project_id))
-            .set((
-                projects::status.eq("queued"),
-                projects::active_workflow_id.eq(Some(workflow_id)),
-                projects::error_message.eq::<Option<String>>(None),
-                projects::updated_at.eq(Utc::now()),
-            ))
-            .execute(&mut conn)
-            .await?;
+        // 状态判断和排队必须在同一条 UPDATE 中完成，避免两个并发请求都成功启动工作流。
+        let affected = diesel::update(
+            projects::table
+                .filter(projects::id.eq(project_id))
+                .filter(projects::status.eq_any(["draft", "failed", "completed"])),
+        )
+        .set((
+            projects::status.eq("queued"),
+            projects::active_workflow_id.eq(Some(workflow_id)),
+            projects::error_message.eq::<Option<String>>(None),
+            projects::updated_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await?;
         if affected == 0 {
-            return Err(AppError::NotFound(format!("项目 {project_id}")));
+            let current = self.get_project(project_id).await?;
+            return Err(AppError::Conflict(format!(
+                "项目 {} 当前状态为 {}，不能重复启动",
+                project_id, current.status
+            )));
         }
         info!(project_id = %project_id, workflow_id = %workflow_id, "项目已加入生成队列");
+        Ok(())
+    }
+
+    /// 写入终态并清除活动工作流。终态项目允许后续显式发起新版本。
+    pub async fn finalize_project(
+        &self,
+        project_id: Uuid,
+        workflow_id: Uuid,
+        status: &str,
+        error_message: Option<&str>,
+    ) -> AppResult<()> {
+        if !matches!(status, "draft" | "failed" | "completed") {
+            return Err(AppError::Internal(format!("{status} 不是项目终态")));
+        }
+        let mut conn = self.connection().await?;
+        let affected = diesel::update(
+            projects::table
+                .filter(projects::id.eq(project_id))
+                .filter(projects::active_workflow_id.eq(Some(workflow_id))),
+        )
+        .set((
+            projects::status.eq(status),
+            projects::error_message.eq(error_message),
+            projects::active_workflow_id.eq::<Option<Uuid>>(None),
+            projects::updated_at.eq(Utc::now()),
+        ))
+        .execute(&mut conn)
+        .await?;
+        if affected == 0 {
+            return Err(AppError::Conflict(format!(
+                "工作流 {workflow_id} 已不是项目 {project_id} 的活动工作流"
+            )));
+        }
+        info!(project_id = %project_id, workflow_id = %workflow_id, status, "项目终态已更新，活动工作流已清除");
         Ok(())
     }
 
@@ -190,17 +249,6 @@ impl Repository {
             .await?;
         info!(project_id = %project_id, version_id = %result.id, version, "项目版本已创建");
         Ok(result)
-    }
-
-    pub async fn get_version(&self, id: Uuid) -> AppResult<ProjectVersion> {
-        let mut conn = self.connection().await?;
-        project_versions::table
-            .find(id)
-            .select(ProjectVersion::as_select())
-            .first(&mut conn)
-            .await
-            .optional()?
-            .ok_or_else(|| AppError::NotFound(format!("项目版本 {id}")))
     }
 
     pub async fn latest_version_for_project(
@@ -295,10 +343,9 @@ impl Repository {
                 project_version_id: version_id,
                 sequence: draft.sequence,
                 narration_text: draft.narration.clone(),
-                visual_type: enum_snake(&draft.visual_type),
                 visual_prompt: draft.visual_prompt.clone(),
                 on_screen_text: draft.on_screen_text.clone(),
-                metadata: serde_json::json!({ "transition": enum_snake(&draft.transition) }),
+                transition: draft.transition.database_value().into(),
             })
             .collect();
         // 删除旧场景和写入新场景必须原子完成，避免 API 在替换期间观察到空分镜。
@@ -366,6 +413,7 @@ impl Repository {
                 generation_tasks::status.eq("running"),
                 generation_tasks::attempt.eq(generation_tasks::attempt + 1),
                 generation_tasks::started_at.eq(Some(Utc::now())),
+                generation_tasks::completed_at.eq::<Option<DateTime<Utc>>>(None),
                 generation_tasks::error_message.eq::<Option<String>>(None),
                 generation_tasks::updated_at.eq(Utc::now()),
             ))
@@ -382,7 +430,7 @@ impl Repository {
         usage: Option<Value>,
     ) -> AppResult<()> {
         let mut conn = self.connection().await?;
-        diesel::update(generation_tasks::table.find(task_id))
+        let affected = diesel::update(generation_tasks::table.find(task_id))
             .set((
                 generation_tasks::status.eq("succeeded"),
                 generation_tasks::output.eq(serde_json::to_value(output)?),
@@ -392,12 +440,16 @@ impl Repository {
             ))
             .execute(&mut conn)
             .await?;
+        if affected == 0 {
+            return Err(AppError::NotFound(format!("生成任务 {task_id}")));
+        }
+        info!(task_id = %task_id, "生成任务已成功完成");
         Ok(())
     }
 
     pub async fn fail_task(&self, task_id: Uuid, message: &str) -> AppResult<()> {
         let mut conn = self.connection().await?;
-        diesel::update(generation_tasks::table.find(task_id))
+        let affected = diesel::update(generation_tasks::table.find(task_id))
             .set((
                 generation_tasks::status.eq("failed"),
                 generation_tasks::error_message.eq(Some(message)),
@@ -406,6 +458,10 @@ impl Repository {
             ))
             .execute(&mut conn)
             .await?;
+        if affected == 0 {
+            return Err(AppError::NotFound(format!("生成任务 {task_id}")));
+        }
+        warn!(task_id = %task_id, error = message, "生成任务失败");
         Ok(())
     }
 
@@ -422,7 +478,7 @@ impl Repository {
                 assets::scene_id.eq(diesel::upsert::excluded(assets::scene_id)),
                 assets::kind.eq(diesel::upsert::excluded(assets::kind)),
                 assets::provider.eq(diesel::upsert::excluded(assets::provider)),
-                assets::provider_asset_id.eq(diesel::upsert::excluded(assets::provider_asset_id)),
+                assets::model.eq(diesel::upsert::excluded(assets::model)),
                 assets::public_url.eq(diesel::upsert::excluded(assets::public_url)),
                 assets::content_type.eq(diesel::upsert::excluded(assets::content_type)),
                 assets::byte_size.eq(diesel::upsert::excluded(assets::byte_size)),
@@ -433,6 +489,27 @@ impl Repository {
             .get_result(&mut conn)
             .await
             .map_err(Into::into)
+    }
+
+    pub async fn mark_scene_generating(&self, scene_id: Uuid) -> AppResult<()> {
+        self.update_scene_status(scene_id, "generating").await
+    }
+
+    pub async fn mark_scene_failed(&self, scene_id: Uuid) -> AppResult<()> {
+        self.update_scene_status(scene_id, "failed").await
+    }
+
+    async fn update_scene_status(&self, scene_id: Uuid, status: &str) -> AppResult<()> {
+        let mut conn = self.connection().await?;
+        let affected = diesel::update(scenes::table.find(scene_id))
+            .set((scenes::status.eq(status), scenes::updated_at.eq(Utc::now())))
+            .execute(&mut conn)
+            .await?;
+        if affected == 0 {
+            return Err(AppError::NotFound(format!("场景 {scene_id}")));
+        }
+        info!(scene_id = %scene_id, status, "场景状态已更新");
+        Ok(())
     }
 
     pub async fn mark_scene_ready(
@@ -458,14 +535,26 @@ impl Repository {
         Ok(())
     }
 
-    pub async fn insert_render(&self, render: &NewRender) -> AppResult<()> {
+    /// 创建或恢复同一 RenderSpec 的渲染记录，并始终返回数据库中的真实 ID。
+    pub async fn start_render(&self, render: &NewRender) -> AppResult<Uuid> {
         let mut conn = self.connection().await?;
         diesel::insert_into(renders::table)
             .values(render)
-            .on_conflict_do_nothing()
-            .execute(&mut conn)
-            .await?;
-        Ok(())
+            .on_conflict((renders::project_version_id, renders::render_spec_hash))
+            .do_update()
+            .set((
+                renders::workflow_id.eq(diesel::upsert::excluded(renders::workflow_id)),
+                renders::status.eq("rendering"),
+                renders::storage_key.eq::<Option<String>>(None),
+                renders::public_url.eq::<Option<String>>(None),
+                renders::duration_ms.eq::<Option<i64>>(None),
+                renders::error_message.eq::<Option<String>>(None),
+                renders::updated_at.eq(Utc::now()),
+            ))
+            .returning(renders::id)
+            .get_result(&mut conn)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn complete_render(
@@ -476,7 +565,7 @@ impl Repository {
         duration_ms: i64,
     ) -> AppResult<()> {
         let mut conn = self.connection().await?;
-        diesel::update(renders::table.find(render_id))
+        let affected = diesel::update(renders::table.find(render_id))
             .set((
                 renders::status.eq("completed"),
                 renders::storage_key.eq(Some(storage_key)),
@@ -486,6 +575,25 @@ impl Repository {
             ))
             .execute(&mut conn)
             .await?;
+        if affected == 0 {
+            return Err(AppError::NotFound(format!("渲染记录 {render_id}")));
+        }
+        Ok(())
+    }
+
+    pub async fn fail_render(&self, render_id: Uuid, message: &str) -> AppResult<()> {
+        let mut conn = self.connection().await?;
+        let affected = diesel::update(renders::table.find(render_id))
+            .set((
+                renders::status.eq("failed"),
+                renders::error_message.eq(Some(message)),
+                renders::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut conn)
+            .await?;
+        if affected == 0 {
+            return Err(AppError::NotFound(format!("渲染记录 {render_id}")));
+        }
         Ok(())
     }
 
@@ -504,13 +612,6 @@ impl Repository {
     }
 }
 
-fn enum_snake<T: Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|v| v.as_str().map(str::to_owned))
-        .unwrap_or_else(|| "unknown".into())
-}
-
 #[derive(Clone, Debug, Queryable, Selectable, Serialize, serde::Deserialize)]
 #[diesel(table_name = scenes)]
 #[diesel(check_for_backend(diesel::pg::Pg))]
@@ -520,15 +621,14 @@ pub struct SceneRecord {
     pub project_version_id: Uuid,
     pub sequence: i32,
     pub narration_text: String,
-    pub visual_type: String,
     pub visual_prompt: String,
     pub on_screen_text: Option<String>,
+    pub transition: String,
     pub status: String,
     pub duration_ms: Option<i64>,
     pub image_asset_id: Option<Uuid>,
     pub audio_asset_id: Option<Uuid>,
     pub caption_asset_id: Option<Uuid>,
-    pub metadata: Value,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -541,10 +641,9 @@ struct NewScene {
     project_version_id: Uuid,
     sequence: i32,
     narration_text: String,
-    visual_type: String,
     visual_prompt: String,
     on_screen_text: Option<String>,
-    metadata: Value,
+    transition: String,
 }
 
 #[derive(Clone, Debug, Insertable)]
@@ -561,7 +660,6 @@ pub struct NewGenerationTask {
     pub idempotency_key: String,
     pub provider: Option<String>,
     pub model: Option<String>,
-    pub input_hash: String,
 }
 
 #[derive(Clone, Debug, Insertable)]
@@ -572,7 +670,7 @@ pub struct NewAsset {
     pub scene_id: Option<Uuid>,
     pub kind: String,
     pub provider: String,
-    pub provider_asset_id: Option<String>,
+    pub model: String,
     pub storage_key: String,
     pub public_url: String,
     pub content_type: String,
@@ -590,7 +688,7 @@ pub struct AssetRecord {
     pub scene_id: Option<Uuid>,
     pub kind: String,
     pub provider: String,
-    pub provider_asset_id: Option<String>,
+    pub model: String,
     pub storage_key: String,
     pub public_url: String,
     pub content_type: String,

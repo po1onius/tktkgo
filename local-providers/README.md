@@ -1,14 +1,18 @@
-# 本地音频 Provider
+# 模型网关与 Provider
 
-本目录提供两个独立常驻 HTTP Provider：CosyVoice 3 生成 WAV 口播，faster-whisper 生成词级字幕时间戳。它们由 `make models` 单独管理，不依赖 PostgreSQL、Restate 或应用服务，并只读取本目录的 `.env`。
+本目录是独立的模型服务运行单元，由固定 Model Gateway、OpenAI Adapter、CosyVoice 3 和 faster-whisper 组成。业务应用只访问 `http://127.0.0.1:8110` 的固定能力 API，不包含任何供应商请求逻辑。
 
-第一次启动会自动从 `.env.example` 创建 `local-providers/.env`。随后可以在该文件中启用模型、选择 CPU/GPU 和调整端口：
+第一次启动会自动从 `.env.example` 创建 `local-providers/.env`。需要先填写 OpenAI API Key，随后可以启用本地模型、选择 CPU/GPU 和调整端口：
 
 ```bash
 make models
 ```
 
-如果修改了监听端口或把模型服务部署到其他机器，只需要在应用根 `.env` 中同步修改 `TKTKGO_COSYVOICE_BASE_URL` 或 `TKTKGO_FASTER_WHISPER_BASE_URL`；模型运行参数仍只存在于本目录配置。
+如果修改网关端口或把整套模型服务部署到其他机器，只需要在应用根 `.env` 中修改 `TKTKGO_MODEL_GATEWAY_URL`；内部 Adapter 地址和模型运行参数仍只存在于本目录配置。
+
+## 固定模型网关
+
+网关协议和扩展要求见 [`gateway/README.md`](gateway/README.md)。网关当前提供 OpenAI 的文案、图片、口播和字幕 Adapter，并把本地口播、字幕请求转发给对应执行服务。
 
 ## faster-whisper
 
@@ -56,4 +60,4 @@ TKTKGO_COSYVOICE_VOICES_FILE="$PWD/voices.json" \
 .venv/bin/python provider.py
 ```
 
-完成配置后执行 `make models`。API 会通过 HTTP 探测服务健康状态，前端新建项目时会自动显示 CosyVoice 及其可用音色。
+完成配置后执行 `make models`。Model Gateway 会探测执行服务健康状态，业务 API 只代理统一能力目录；前端新建项目时会自动显示 CosyVoice 及其可用音色。

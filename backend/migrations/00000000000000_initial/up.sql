@@ -5,11 +5,15 @@ CREATE TABLE projects (
     language VARCHAR(16) NOT NULL,
     aspect_ratio VARCHAR(16) NOT NULL,
     target_duration_seconds INTEGER NOT NULL,
+    text_provider VARCHAR(64) NOT NULL,
+    text_model VARCHAR(128) NOT NULL,
+    image_provider VARCHAR(64) NOT NULL,
+    image_model VARCHAR(128) NOT NULL,
     voice VARCHAR(64) NOT NULL,
-    speech_provider VARCHAR(64) NOT NULL DEFAULT 'openai',
-    speech_model VARCHAR(128) NOT NULL DEFAULT 'gpt-4o-mini-tts',
-    transcription_provider VARCHAR(64) NOT NULL DEFAULT 'openai',
-    transcription_model VARCHAR(128) NOT NULL DEFAULT 'whisper-1',
+    speech_provider VARCHAR(64) NOT NULL,
+    speech_model VARCHAR(128) NOT NULL,
+    transcription_provider VARCHAR(64) NOT NULL,
+    transcription_model VARCHAR(128) NOT NULL,
     require_script_review BOOLEAN NOT NULL DEFAULT TRUE,
     status VARCHAR(32) NOT NULL DEFAULT 'draft',
     active_workflow_id UUID,
@@ -19,9 +23,13 @@ CREATE TABLE projects (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     CHECK (target_duration_seconds BETWEEN 10 AND 3600),
     CHECK (aspect_ratio IN ('16:9', '9:16', '1:1')),
-    CHECK (speech_provider IN ('openai', 'cosyvoice')),
+    CHECK (text_provider <> ''),
+    CHECK (text_model <> ''),
+    CHECK (image_provider <> ''),
+    CHECK (image_model <> ''),
+    CHECK (speech_provider <> ''),
     CHECK (speech_model <> ''),
-    CHECK (transcription_provider IN ('openai', 'faster-whisper')),
+    CHECK (transcription_provider <> ''),
     CHECK (transcription_model <> ''),
     CHECK (status IN ('draft', 'queued', 'generating_script', 'waiting_script_review', 'generating_storyboard', 'generating_assets', 'building_timeline', 'rendering', 'completed', 'failed'))
 );
@@ -47,19 +55,19 @@ CREATE TABLE scenes (
     project_version_id UUID NOT NULL,
     sequence INTEGER NOT NULL,
     narration_text TEXT NOT NULL,
-    visual_type VARCHAR(32) NOT NULL,
     visual_prompt TEXT NOT NULL,
     on_screen_text TEXT,
+    transition VARCHAR(16) NOT NULL,
     status VARCHAR(32) NOT NULL DEFAULT 'pending',
     duration_ms BIGINT,
     image_asset_id UUID,
     audio_asset_id UUID,
     caption_asset_id UUID,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (project_version_id, sequence),
-    CHECK (status IN ('pending', 'generating', 'ready', 'failed'))
+    CHECK (status IN ('pending', 'generating', 'ready', 'failed')),
+    CHECK (transition IN ('fade', 'slide', 'wipe', 'none'))
 );
 CREATE INDEX idx_scenes_project_version ON scenes (project_version_id, sequence);
 
@@ -69,7 +77,7 @@ CREATE TABLE assets (
     scene_id UUID,
     kind VARCHAR(32) NOT NULL,
     provider VARCHAR(64) NOT NULL,
-    provider_asset_id TEXT,
+    model VARCHAR(128) NOT NULL,
     storage_key TEXT NOT NULL,
     public_url TEXT NOT NULL,
     content_type VARCHAR(128) NOT NULL,
@@ -93,7 +101,6 @@ CREATE TABLE generation_tasks (
     idempotency_key VARCHAR(256) NOT NULL,
     provider VARCHAR(64),
     model VARCHAR(128),
-    input_hash VARCHAR(128) NOT NULL,
     output JSONB,
     usage JSONB,
     error_message TEXT,
@@ -127,20 +134,3 @@ CREATE TABLE renders (
     CHECK (status IN ('queued', 'rendering', 'completed', 'failed'))
 );
 CREATE INDEX idx_renders_project ON renders (project_id, created_at DESC);
-
-CREATE TABLE provider_usages (
-    id UUID PRIMARY KEY,
-    project_id UUID NOT NULL,
-    workflow_id UUID NOT NULL,
-    task_id UUID,
-    provider VARCHAR(64) NOT NULL,
-    model VARCHAR(128) NOT NULL,
-    request_id TEXT,
-    input_units BIGINT,
-    output_units BIGINT,
-    cost_micros BIGINT,
-    latency_ms BIGINT NOT NULL,
-    metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX idx_provider_usages_project ON provider_usages (project_id, created_at DESC);

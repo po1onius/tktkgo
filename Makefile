@@ -31,14 +31,9 @@ dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 	fi; \
 	if [[ ! -f "$(ENV_FILE)" ]]; then \
 		cp .env.example "$(ENV_FILE)"; \
-		echo "[env] 已创建 $(ENV_FILE)，请填写 TKTKGO_OPENAI_API_KEY 后重新执行 make" >&2; \
-		exit 1; \
+		echo "[env] 已创建应用配置 $(ENV_FILE)"; \
 	fi; \
 	set -a; source "$(ENV_FILE)"; set +a; \
-	if [[ -z "$${TKTKGO_OPENAI_API_KEY:-}" ]]; then \
-		echo "[env] TKTKGO_OPENAI_API_KEY 不能为空，请编辑 $(ENV_FILE)" >&2; \
-		exit 1; \
-	fi; \
 	api_pid=""; \
 	workflow_pid=""; \
 	render_pid=""; \
@@ -140,7 +135,7 @@ dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 	echo "[local] 检测到服务退出，退出码：$$status" >&2; \
 	exit "$$status"
 
-models: ## 独立启动本地 CosyVoice 和 faster-whisper Provider
+models: ## 独立启动固定模型网关及模型 Provider
 	@set -Eeuo pipefail; \
 	for tool in uv "$(CURL)"; do \
 		if ! command -v "$$tool" >/dev/null; then \
@@ -153,6 +148,11 @@ models: ## 独立启动本地 CosyVoice 和 faster-whisper Provider
 		echo "[models] 已创建 $(LOCAL_MODELS_ENV_FILE)，请按需调整模型和设备配置"; \
 	fi; \
 	set -a; source "$(LOCAL_MODELS_ENV_FILE)"; set +a; \
+	if [[ -z "$${TKTKGO_OPENAI_API_KEY:-}" ]]; then \
+		echo "[models] 请在 $(LOCAL_MODELS_ENV_FILE) 配置 TKTKGO_OPENAI_API_KEY" >&2; \
+		exit 1; \
+	fi; \
+	gateway_pid=""; \
 	cosyvoice_pid=""; \
 	faster_whisper_pid=""; \
 	wait_provider() { \
@@ -175,10 +175,10 @@ models: ## 独立启动本地 CosyVoice 和 faster-whisper Provider
 		status=$$?; \
 		trap - EXIT INT TERM; \
 		echo "[models] 正在停止本地模型服务"; \
-		for pid in "$$cosyvoice_pid" "$$faster_whisper_pid"; do \
+		for pid in "$$gateway_pid" "$$cosyvoice_pid" "$$faster_whisper_pid"; do \
 			if [[ -n "$$pid" ]] && kill -0 "$$pid" 2>/dev/null; then kill "$$pid" 2>/dev/null || true; fi; \
 		done; \
-		for pid in "$$cosyvoice_pid" "$$faster_whisper_pid"; do \
+		for pid in "$$gateway_pid" "$$cosyvoice_pid" "$$faster_whisper_pid"; do \
 			if [[ -n "$$pid" ]]; then wait "$$pid" 2>/dev/null || true; fi; \
 		done; \
 		exit "$$status"; \
@@ -203,14 +203,16 @@ models: ## 独立启动本地 CosyVoice 和 faster-whisper Provider
 		cosyvoice_pid=$$!; \
 		wait_provider "cosyvoice" "$$cosyvoice_pid" "http://127.0.0.1:$${TKTKGO_COSYVOICE_PORT:-8101}"; \
 	fi; \
-	model_pids=(); \
+	echo "[model-gateway] 同步 uv 环境并启动固定模型能力 API"; \
+	uv sync --project local-providers/gateway --frozen; \
+	uv run --project local-providers/gateway --frozen \
+		python local-providers/gateway/provider.py & \
+	gateway_pid=$$!; \
+	wait_provider "model-gateway" "$$gateway_pid" "http://127.0.0.1:$${TKTKGO_MODEL_GATEWAY_PORT:-8110}"; \
+	model_pids=("$$gateway_pid"); \
 	if [[ -n "$$cosyvoice_pid" ]]; then model_pids+=("$$cosyvoice_pid"); fi; \
 	if [[ -n "$$faster_whisper_pid" ]]; then model_pids+=("$$faster_whisper_pid"); fi; \
-	if [[ "$${#model_pids[@]}" == "0" ]]; then \
-		echo "[models] 没有启用任何本地模型，请编辑 $(LOCAL_MODELS_ENV_FILE)" >&2; \
-		exit 1; \
-	fi; \
-	echo "[models] 本地模型服务已启动；按 Ctrl+C 停止"; \
+	echo "[models] 模型网关与 Provider 已启动；按 Ctrl+C 停止"; \
 	set +e; wait -n "$${model_pids[@]}"; status=$$?; set -e; \
 	echo "[models] 检测到 Provider 退出，退出码：$$status" >&2; \
 	exit "$$status"

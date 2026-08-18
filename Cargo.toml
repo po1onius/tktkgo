@@ -13,16 +13,13 @@ rust-version = "1.97"
 license = "UNLICENSED"
 
 [workspace.dependencies]
-anyhow = "1.0.100"
 async-trait = "0.1.89"
 axum = "0.8.9"
-base64 = "0.22.1"
 blake3 = "1.8.2"
 chrono = { version = "0.4.42", features = ["serde"] }
 diesel = { version = "2.3.12", features = ["postgres", "uuid", "chrono", "serde_json"] }
 diesel-async = { version = "0.9.2", features = ["postgres", "bb8"] }
 diesel_migrations = "2.3.1"
-http = "1.4.0"
 restate-sdk = "=0.11.1"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "multipart", "rustls"] }
 schemars = { version = "1.2.0", features = ["chrono04", "uuid1"] }
@@ -39,4 +36,3 @@ uuid = { version = "1.20.0", features = ["v4", "serde"] }
 lto = "thin"
 codegen-units = 1
 strip = "symbols"
-

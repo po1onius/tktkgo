@@ -2832,7 +2832,6 @@ name = "tktkgo-api"
 version = "0.1.0"
 dependencies = [
  "axum",
- "http",
  "reqwest",
  "serde",
  "serde_json",
@@ -2848,9 +2847,7 @@ dependencies = [
 name = "tktkgo-app"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "async-trait",
- "base64",
  "blake3",
  "chrono",
  "diesel",
@@ -2871,9 +2868,7 @@ dependencies = [
 name = "tktkgo-workflow"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "restate-sdk",
- "serde",
  "tktkgo-app",
  "tokio",
  "tracing",

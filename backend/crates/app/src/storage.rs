@@ -1,12 +1,13 @@
 use std::path::{Component, Path, PathBuf};
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::{debug, instrument};
 
 use crate::{AppError, AppResult};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StoredObject {
     pub key: String,
     pub public_url: String,

@@ -3,7 +3,7 @@ import "./styles.css";
 
 export const metadata: Metadata = {
   title: "TK视频工坊",
-  description: "从主题到可编辑视频",
+  description: "从主题到可审核、可重复生成的视频",
 };
 
 export default function RootLayout({

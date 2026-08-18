@@ -60,9 +60,27 @@ const SceneView: React.FC<{ scene: RenderScene }> = ({ scene }) => {
       extrapolateRight: "clamp",
     },
   );
+  const transitionStyle: React.CSSProperties = (() => {
+    switch (scene.transition) {
+      case "none":
+        return {};
+      case "slide":
+        return {
+          opacity,
+          transform: `translateX(${(1 - entrance) * 8}%)`,
+        };
+      case "wipe":
+        return {
+          opacity,
+          clipPath: `inset(0 ${(1 - entrance) * 100}% 0 0)`,
+        };
+      default:
+        return { opacity };
+    }
+  })();
 
   return (
-    <AbsoluteFill style={{ overflow: "hidden", opacity }}>
+    <AbsoluteFill style={{ overflow: "hidden", ...transitionStyle }}>
       <Img
         src={scene.image_url}
         style={{

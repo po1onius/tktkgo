@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::task::JoinSet;
 use tracing::{info, instrument};
 use uuid::Uuid;
 
@@ -10,18 +11,26 @@ use crate::{
     db::{AssetRecord, NewAsset, NewGenerationTask, NewRender, Repository, SceneRecord},
     domain::{
         CaptionCue, Project, ProjectVersion, RenderJobRequest, RenderScene, RenderSpec, ScriptSpec,
-        StoryboardSpec, TransitionKind, VisualType,
+        StoryboardSpec, TransitionKind,
     },
     media::probe_duration_ms,
-    providers::{GenerationProviders, ProviderOutput},
+    providers::{ImageGenerationRequest, ModelGatewayClient, ProviderOutput, ProviderUsage},
     render::RenderClient,
-    storage::AssetStore,
+    storage::{AssetStore, StoredObject},
 };
+
+const SCRIPT_PROMPT_VERSION: &str = "script-v1";
+const STORYBOARD_PROMPT_VERSION: &str = "storyboard-v1";
+const IMAGE_PROMPT_VERSION: &str = "image-v1";
+const SPEECH_PROMPT_VERSION: &str = "speech-v1";
+const TRANSCRIPTION_PROMPT_VERSION: &str = "transcription-v1";
+const RENDER_PIPELINE_VERSION: &str = "render-v1";
+const SCENE_CONCURRENCY: usize = 3;
 
 #[derive(Clone)]
 pub struct PipelineService {
     repository: Repository,
-    providers: GenerationProviders,
+    gateway: ModelGatewayClient,
     storage: Arc<dyn AssetStore>,
     renderer: RenderClient,
     asset_root: PathBuf,
@@ -30,14 +39,14 @@ pub struct PipelineService {
 impl PipelineService {
     pub fn new(
         repository: Repository,
-        providers: GenerationProviders,
+        gateway: ModelGatewayClient,
         storage: Arc<dyn AssetStore>,
         renderer: RenderClient,
         asset_root: PathBuf,
     ) -> Self {
         Self {
             repository,
-            providers,
+            gateway,
             storage,
             renderer,
             asset_root,
@@ -55,14 +64,19 @@ impl PipelineService {
         project: &Project,
         version: &ProjectVersion,
     ) -> AppResult<ScriptSpec> {
-        let key = format!(
-            "{}:{}:script:{}:{}",
-            project.id,
-            version.version,
-            self.providers.text().name(),
-            self.providers.text().model()
+        let key = stable_task_key(
+            "script",
+            &format!(
+                "{}:{}:script:{}:{}:{}",
+                project.id,
+                version.version,
+                project.text_provider,
+                project.text_model,
+                SCRIPT_PROMPT_VERSION,
+            ),
         );
         if let Some(cached) = self.cached::<ScriptSpec>(&key).await? {
+            validate_script(&cached)?;
             return Ok(cached);
         }
         let task_id = self
@@ -73,20 +87,29 @@ impl PipelineService {
                 scene_id: None,
                 stage: "script",
                 key: &key,
-                provider: self.providers.text().name(),
-                model: self.providers.text().model(),
+                provider: &project.text_provider,
+                model: &project.text_model,
             })
             .await?;
-        let output = self
-            .providers
-            .text()
-            .generate_script(project, task_id)
-            .await;
-        match output {
+        let result = async {
+            let output = self
+                .gateway
+                .generate_script(
+                    project,
+                    &project.text_provider,
+                    &project.text_model,
+                    task_id,
+                )
+                .await?;
+            validate_script(&output.value)?;
+            self.repository
+                .save_script(version.id, &output.value)
+                .await?;
+            AppResult::Ok(output)
+        }
+        .await;
+        match result {
             Ok(output) => {
-                self.repository
-                    .save_script(version.id, &output.value)
-                    .await?;
                 self.finish_task(task_id, &output).await?;
                 Ok(output.value)
             }
@@ -106,15 +129,20 @@ impl PipelineService {
         script: &ScriptSpec,
     ) -> AppResult<StoryboardSpec> {
         let input = serde_json::to_vec(script)?;
-        let key = format!(
-            "{}:{}:storyboard:{}:{}:{}",
-            project.id,
-            version.version,
-            self.providers.text().name(),
-            self.providers.text().model(),
-            short_hash(&input)
+        let key = stable_task_key(
+            "storyboard",
+            &format!(
+                "{}:{}:storyboard:{}:{}:{}:{}",
+                project.id,
+                version.version,
+                project.text_provider,
+                project.text_model,
+                STORYBOARD_PROMPT_VERSION,
+                content_hash(&input)
+            ),
         );
         if let Some(cached) = self.cached::<StoryboardSpec>(&key).await? {
+            validate_storyboard(&cached, script)?;
             return Ok(cached);
         }
         let task_id = self
@@ -125,24 +153,33 @@ impl PipelineService {
                 scene_id: None,
                 stage: "storyboard",
                 key: &key,
-                provider: self.providers.text().name(),
-                model: self.providers.text().model(),
+                provider: &project.text_provider,
+                model: &project.text_model,
             })
             .await?;
-        let output = self
-            .providers
-            .text()
-            .generate_storyboard(project, script, task_id)
-            .await;
-        match output {
+        let result = async {
+            let output = self
+                .gateway
+                .generate_storyboard(
+                    project,
+                    script,
+                    &project.text_provider,
+                    &project.text_model,
+                    task_id,
+                )
+                .await?;
+            validate_storyboard(&output.value, script)?;
+            self.repository
+                .save_storyboard(version.id, &output.value)
+                .await?;
+            self.repository
+                .replace_scenes(project.id, version.id, &output.value.scenes)
+                .await?;
+            AppResult::Ok(output)
+        }
+        .await;
+        match result {
             Ok(output) => {
-                validate_storyboard(&output.value)?;
-                self.repository
-                    .save_storyboard(version.id, &output.value)
-                    .await?;
-                self.repository
-                    .replace_scenes(project.id, version.id, &output.value.scenes)
-                    .await?;
                 self.finish_task(task_id, &output).await?;
                 Ok(output.value)
             }
@@ -162,73 +199,137 @@ impl PipelineService {
         scene: &SceneRecord,
         style: &crate::domain::StyleBible,
     ) -> AppResult<GeneratedScene> {
-        let input = serde_json::to_vec(&(
-            scene.narration_text.as_str(),
-            scene.visual_prompt.as_str(),
-            style,
-        ))?;
-        let speech_provider = self.providers.speech(&project.speech_provider)?;
-        let transcription_provider = self
-            .providers
-            .transcription(&project.transcription_provider)?;
-        // 场景素材由三个独立 Provider 协作生成，任一实现或模型变化都必须使缓存失效。
-        let provider_signature = format!(
-            "image={}/{};speech={}/{};transcription={}/{}",
-            self.providers.image().name(),
-            self.providers.image().model(),
-            speech_provider.name(),
-            project.speech_model,
-            transcription_provider.name(),
-            project.transcription_model,
-        );
-        let key = format!(
-            "{}:{}:scene:{}:{}:{}",
-            project.id,
-            version.version,
-            scene.sequence,
-            short_hash(provider_signature.as_bytes()),
-            short_hash(&input)
-        );
-        if let Some(cached) = self.cached::<GeneratedScene>(&key).await? {
-            return Ok(cached);
-        }
-        let task_id = self
-            .start_task(TaskDescriptor {
-                workflow_id,
-                project_id: project.id,
-                version_id: Some(version.id),
-                scene_id: Some(scene.id),
-                stage: "scene_assets",
-                key: &key,
-                provider: "pipeline",
-                model: "scene-assets-v1",
-            })
-            .await?;
+        self.repository.mark_scene_generating(scene.id).await?;
         let result = self
-            .create_scene_assets(project, scene, style, task_id)
+            .create_scene_assets(workflow_id, project, version, scene, style)
             .await;
-        match result {
-            Ok(generated) => {
-                self.repository
-                    .complete_task(task_id, &generated, None)
-                    .await?;
-                Ok(generated)
+        if let Err(error) = &result {
+            self.repository.mark_scene_failed(scene.id).await?;
+            info!(scene_id = %scene.id, error = %error, "场景素材生成失败");
+        }
+        result
+    }
+
+    /// 有界并发生成场景，既缩短长视频耗时，也避免同时压满图片与语音 Provider。
+    /// 已启动的任务全部等待到明确成功或失败后才返回，保证任务状态可用于排障。
+    #[instrument(skip(self, project, version, scenes, style), fields(workflow_id = %workflow_id, project_id = %project.id, scene_count = scenes.len()))]
+    pub async fn generate_all_scene_assets(
+        &self,
+        workflow_id: Uuid,
+        project: Project,
+        version: ProjectVersion,
+        scenes: Vec<SceneRecord>,
+        style: crate::domain::StyleBible,
+    ) -> AppResult<Vec<GeneratedScene>> {
+        let mut pending = scenes.into_iter();
+        let mut running = JoinSet::new();
+        let mut generated = Vec::new();
+        let mut first_error = None;
+
+        for _ in 0..SCENE_CONCURRENCY {
+            let Some(scene) = pending.next() else { break };
+            spawn_scene_task(
+                &mut running,
+                self.clone(),
+                workflow_id,
+                project.clone(),
+                version.clone(),
+                scene,
+                style.clone(),
+            );
+        }
+
+        while let Some(result) = running.join_next().await {
+            match result {
+                Ok(Ok(scene)) => generated.push(scene),
+                Ok(Err(error)) => {
+                    if first_error.is_none() {
+                        first_error = Some(error);
+                    }
+                }
+                Err(error) => {
+                    if first_error.is_none() {
+                        first_error =
+                            Some(AppError::Internal(format!("场景生成任务异常终止: {error}")));
+                    }
+                }
             }
-            Err(err) => {
-                self.repository.fail_task(task_id, &err.to_string()).await?;
-                Err(err)
+
+            // 发生错误后不再启动新场景，但继续等待已启动任务完成并写入终态。
+            if first_error.is_none()
+                && let Some(scene) = pending.next()
+            {
+                spawn_scene_task(
+                    &mut running,
+                    self.clone(),
+                    workflow_id,
+                    project.clone(),
+                    version.clone(),
+                    scene,
+                    style.clone(),
+                );
             }
         }
+
+        if let Some(error) = first_error {
+            return Err(error);
+        }
+        generated.sort_by_key(|scene| scene.sequence);
+        info!(workflow_id = %workflow_id, project_id = %project.id, scene_count = generated.len(), "全部场景素材生成完成");
+        Ok(generated)
     }
 
     async fn create_scene_assets(
         &self,
+        workflow_id: Uuid,
         project: &Project,
+        version: &ProjectVersion,
         scene: &SceneRecord,
         style: &crate::domain::StyleBible,
-        task_id: Uuid,
     ) -> AppResult<GeneratedScene> {
-        let portrait = project.aspect_ratio == "9:16";
+        // 图片与口播互不依赖，可以并行执行；使用 join 等待两边都收口任务状态，
+        // 避免一边失败后取消另一边，使 generation_tasks 永久残留 running。
+        let (image, speech) = tokio::join!(
+            self.generate_image_asset(workflow_id, project, version, scene, style),
+            self.generate_speech_asset(workflow_id, project, version, scene),
+        );
+        let image = image?;
+        let speech = speech?;
+        let captions = self
+            .generate_caption_asset(workflow_id, project, version, scene, &speech)
+            .await?;
+
+        self.repository
+            .mark_scene_ready(
+                scene.id,
+                speech.duration_ms,
+                image.asset_id,
+                speech.asset.asset_id,
+                captions.asset_id,
+            )
+            .await?;
+
+        Ok(GeneratedScene {
+            scene_id: scene.id,
+            sequence: scene.sequence,
+            image_url: image.object.public_url,
+            audio_url: speech.asset.object.public_url,
+            on_screen_text: scene.on_screen_text.clone(),
+            transition: parse_transition(&scene.transition),
+            duration_ms: speech.duration_ms,
+            captions: captions.cues,
+        })
+    }
+
+    async fn generate_image_asset(
+        &self,
+        workflow_id: Uuid,
+        project: &Project,
+        version: &ProjectVersion,
+        scene: &SceneRecord,
+        style: &crate::domain::StyleBible,
+    ) -> AppResult<GeneratedAsset> {
+        let (width, height) = render_dimensions(&project.aspect_ratio);
         let prompt = format!(
             "{}\n统一艺术方向：{}\n色板：{}\n画面规则：{}\n禁止内容：{}\n不要生成任何文字、水印或标志。",
             scene.visual_prompt,
@@ -237,119 +338,265 @@ impl PipelineService {
             style.image_rules.join("；"),
             style.negative_prompt
         );
-        let image = self
-            .providers
-            .image()
-            .generate_image(&prompt, portrait, task_id)
-            .await?;
-        let speech_provider = self.providers.speech(&project.speech_provider)?;
-        let speech = speech_provider
-            .synthesize_speech(
-                &scene.narration_text,
-                &project.voice,
-                &project.speech_model,
-                task_id,
-            )
-            .await?;
-
-        let base_key = format!("projects/{}/scenes/{}", project.id, scene.id);
-        let image_object = self
-            .storage
-            .put(
-                &format!("{base_key}/illustration.png"),
-                "image/png",
-                &image.value,
-            )
-            .await?;
-        let audio_key = format!("{base_key}/narration.wav");
-        let audio_object = self
-            .storage
-            .put(&audio_key, "audio/wav", &speech.value)
-            .await?;
-        let duration_ms = probe_duration_ms(self.asset_root.join(&audio_key)).await?;
-
-        let transcription_provider = self
-            .providers
-            .transcription(&project.transcription_provider)?;
-        let aligned = transcription_provider
-            .align_speech(
-                speech.value,
-                &scene.narration_text,
-                &project.transcription_model,
-                task_id,
-            )
-            .await?;
-        let caption_bytes = serde_json::to_vec_pretty(&aligned.value)?;
-        let caption_object = self
-            .storage
-            .put(
-                &format!("{base_key}/captions.json"),
-                "application/json",
-                &caption_bytes,
-            )
-            .await?;
-
-        let image_asset = self
-            .insert_asset(
+        let key = stable_task_key(
+            "image",
+            &format!(
+                "{}:{}:scene:{}:image:{}:{}:{}:{}",
                 project.id,
+                version.version,
                 scene.id,
-                AssetDescriptor {
-                    kind: "image",
-                    provider: self.providers.image().name(),
-                    model: self.providers.image().model(),
-                    object: &image_object,
-                    metadata: json!({"usage": image.usage}),
+                project.image_provider,
+                project.image_model,
+                IMAGE_PROMPT_VERSION,
+                content_hash(prompt.as_bytes()),
+            ),
+        );
+        if let Some(cached) = self.cached::<GeneratedAsset>(&key).await? {
+            return Ok(cached);
+        }
+        let task_id = self
+            .start_task(TaskDescriptor {
+                workflow_id,
+                project_id: project.id,
+                version_id: Some(version.id),
+                scene_id: Some(scene.id),
+                stage: "image",
+                key: &key,
+                provider: &project.image_provider,
+                model: &project.image_model,
+            })
+            .await?;
+        let result: AppResult<(GeneratedAsset, ProviderUsage)> = async {
+            let output = self
+                .gateway
+                .generate_image(ImageGenerationRequest {
+                    prompt: &prompt,
+                    width,
+                    height,
+                    quality: "high",
+                    provider: &project.image_provider,
+                    model: &project.image_model,
+                    request_id: task_id,
+                })
+                .await?;
+            let base_key = format!("projects/{}/scenes/{}", project.id, scene.id);
+            let object = self
+                .storage
+                .put(
+                    &format!("{base_key}/illustration.png"),
+                    "image/png",
+                    &output.value,
+                )
+                .await?;
+            let asset = self
+                .insert_asset(
+                    project.id,
+                    scene.id,
+                    AssetDescriptor {
+                        kind: "image",
+                        provider: &project.image_provider,
+                        model: &project.image_model,
+                        object: &object,
+                        metadata: json!({"width": width, "height": height, "quality": "high"}),
+                    },
+                )
+                .await?;
+            Ok((
+                GeneratedAsset {
+                    asset_id: asset.id,
+                    object,
                 },
-            )
-            .await?;
-        let audio_asset = self
-            .insert_asset(
-                project.id,
-                scene.id,
-                AssetDescriptor {
-                    kind: "audio",
-                    provider: speech_provider.name(),
-                    model: &project.speech_model,
-                    object: &audio_object,
-                    metadata: json!({"usage": speech.usage, "duration_ms": duration_ms}),
-                },
-            )
-            .await?;
-        let caption_asset = self
-            .insert_asset(
-                project.id,
-                scene.id,
-                AssetDescriptor {
-                    kind: "captions",
-                    provider: transcription_provider.name(),
-                    model: &project.transcription_model,
-                    object: &caption_object,
-                    metadata: json!({"usage": aligned.usage}),
-                },
-            )
-            .await?;
-        self.repository
-            .mark_scene_ready(
-                scene.id,
-                duration_ms,
-                image_asset.id,
-                audio_asset.id,
-                caption_asset.id,
-            )
-            .await?;
+                output.usage,
+            ))
+        }
+        .await;
+        match result {
+            Ok((cached, usage)) => {
+                self.complete_cached_task(task_id, &cached, usage).await?;
+                Ok(cached)
+            }
+            Err(error) => self.fail_task(task_id, error).await,
+        }
+    }
 
-        Ok(GeneratedScene {
-            scene_id: scene.id,
-            sequence: scene.sequence,
-            narration: scene.narration_text.clone(),
-            visual_type: parse_visual_type(&scene.visual_type),
-            image_url: image_object.public_url,
-            audio_url: audio_object.public_url,
-            on_screen_text: scene.on_screen_text.clone(),
-            transition: parse_transition(scene.metadata.get("transition").and_then(Value::as_str)),
-            duration_ms,
-            captions: aligned.value,
-        })
+    async fn generate_speech_asset(
+        &self,
+        workflow_id: Uuid,
+        project: &Project,
+        version: &ProjectVersion,
+        scene: &SceneRecord,
+    ) -> AppResult<GeneratedSpeech> {
+        let key = stable_task_key(
+            "speech",
+            &format!(
+                "{}:{}:scene:{}:speech:{}:{}:{}:{}:{}",
+                project.id,
+                version.version,
+                scene.id,
+                project.speech_provider,
+                project.speech_model,
+                project.voice,
+                SPEECH_PROMPT_VERSION,
+                content_hash(scene.narration_text.as_bytes()),
+            ),
+        );
+        if let Some(cached) = self.cached::<GeneratedSpeech>(&key).await? {
+            return Ok(cached);
+        }
+        let task_id = self
+            .start_task(TaskDescriptor {
+                workflow_id,
+                project_id: project.id,
+                version_id: Some(version.id),
+                scene_id: Some(scene.id),
+                stage: "speech",
+                key: &key,
+                provider: &project.speech_provider,
+                model: &project.speech_model,
+            })
+            .await?;
+        let result: AppResult<(GeneratedSpeech, ProviderUsage)> = async {
+            let output = self
+                .gateway
+                .synthesize_speech(
+                    &scene.narration_text,
+                    &project.voice,
+                    &project.speech_provider,
+                    &project.speech_model,
+                    task_id,
+                )
+                .await?;
+            let base_key = format!("projects/{}/scenes/{}", project.id, scene.id);
+            let audio_key = format!("{base_key}/narration.wav");
+            let object = self
+                .storage
+                .put(&audio_key, "audio/wav", &output.value)
+                .await?;
+            let duration_ms = probe_duration_ms(self.asset_root.join(&audio_key)).await?;
+            let asset = self
+                .insert_asset(
+                    project.id,
+                    scene.id,
+                    AssetDescriptor {
+                        kind: "audio",
+                        provider: &project.speech_provider,
+                        model: &project.speech_model,
+                        object: &object,
+                        metadata: json!({"duration_ms": duration_ms}),
+                    },
+                )
+                .await?;
+            Ok((
+                GeneratedSpeech {
+                    asset: GeneratedAsset {
+                        asset_id: asset.id,
+                        object,
+                    },
+                    duration_ms,
+                },
+                output.usage,
+            ))
+        }
+        .await;
+        match result {
+            Ok((cached, usage)) => {
+                self.complete_cached_task(task_id, &cached, usage).await?;
+                Ok(cached)
+            }
+            Err(error) => self.fail_task(task_id, error).await,
+        }
+    }
+
+    async fn generate_caption_asset(
+        &self,
+        workflow_id: Uuid,
+        project: &Project,
+        version: &ProjectVersion,
+        scene: &SceneRecord,
+        speech: &GeneratedSpeech,
+    ) -> AppResult<GeneratedCaptions> {
+        let key = stable_task_key(
+            "transcription",
+            &format!(
+                "{}:{}:scene:{}:captions:{}:{}:{}:{}:{}",
+                project.id,
+                version.version,
+                scene.id,
+                project.transcription_provider,
+                project.transcription_model,
+                TRANSCRIPTION_PROMPT_VERSION,
+                speech.asset.object.checksum,
+                content_hash(scene.narration_text.as_bytes()),
+            ),
+        );
+        if let Some(cached) = self.cached::<GeneratedCaptions>(&key).await? {
+            return Ok(cached);
+        }
+        let task_id = self
+            .start_task(TaskDescriptor {
+                workflow_id,
+                project_id: project.id,
+                version_id: Some(version.id),
+                scene_id: Some(scene.id),
+                stage: "transcription",
+                key: &key,
+                provider: &project.transcription_provider,
+                model: &project.transcription_model,
+            })
+            .await?;
+        let result: AppResult<(GeneratedCaptions, ProviderUsage)> = async {
+            let audio = tokio::fs::read(self.asset_root.join(&speech.asset.object.key)).await?;
+            let output = self
+                .gateway
+                .align_speech(
+                    audio,
+                    &scene.narration_text,
+                    &project.transcription_provider,
+                    &project.transcription_model,
+                    task_id,
+                )
+                .await?;
+            validate_captions(&output.value, speech.duration_ms)?;
+            let caption_bytes = serde_json::to_vec_pretty(&output.value)?;
+            let base_key = format!("projects/{}/scenes/{}", project.id, scene.id);
+            let object = self
+                .storage
+                .put(
+                    &format!("{base_key}/captions.json"),
+                    "application/json",
+                    &caption_bytes,
+                )
+                .await?;
+            let asset = self
+                .insert_asset(
+                    project.id,
+                    scene.id,
+                    AssetDescriptor {
+                        kind: "captions",
+                        provider: &project.transcription_provider,
+                        model: &project.transcription_model,
+                        object: &object,
+                        metadata: json!({"cue_count": output.value.len()}),
+                    },
+                )
+                .await?;
+            Ok((
+                GeneratedCaptions {
+                    asset_id: asset.id,
+                    object,
+                    cues: output.value,
+                },
+                output.usage,
+            ))
+        }
+        .await;
+        match result {
+            Ok((cached, usage)) => {
+                self.complete_cached_task(task_id, &cached, usage).await?;
+                Ok(cached)
+            }
+            Err(error) => self.fail_task(task_id, error).await,
+        }
     }
 
     async fn insert_asset(
@@ -372,7 +619,7 @@ impl PipelineService {
                 scene_id: Some(scene_id),
                 kind: kind.into(),
                 provider: provider.into(),
-                provider_asset_id: Some(model.into()),
+                model: model.into(),
                 storage_key: object.key.clone(),
                 public_url: object.public_url.clone(),
                 content_type: match kind {
@@ -394,11 +641,7 @@ impl PipelineService {
         version: &ProjectVersion,
         generated: Vec<GeneratedScene>,
     ) -> RenderSpec {
-        let (width, height) = match project.aspect_ratio.as_str() {
-            "9:16" => (1080, 1920),
-            "1:1" => (1080, 1080),
-            _ => (1920, 1080),
-        };
+        let (width, height) = render_dimensions(&project.aspect_ratio);
         let fps = 30;
         let mut cursor = 0_i64;
         let scenes = generated
@@ -411,8 +654,6 @@ impl PipelineService {
                     sequence: scene.sequence,
                     start_frame: cursor,
                     duration_in_frames,
-                    narration: scene.narration,
-                    visual_type: scene.visual_type,
                     image_url: scene.image_url,
                     audio_url: scene.audio_url,
                     on_screen_text: scene.on_screen_text,
@@ -444,24 +685,16 @@ impl PipelineService {
     ) -> AppResult<String> {
         let bytes = serde_json::to_vec(&spec)?;
         let hash = blake3::hash(&bytes).to_hex().to_string();
-        let key = format!("{}:{}:render:{}", project.id, version.version, &hash[..16]);
+        let key = stable_task_key(
+            "render",
+            &format!(
+                "{}:{}:render:{}:{}",
+                project.id, version.version, RENDER_PIPELINE_VERSION, hash
+            ),
+        );
         if let Some(cached) = self.cached::<RenderCache>(&key).await? {
             return Ok(cached.public_url);
         }
-        let render_id = Uuid::new_v4();
-        self.repository
-            .insert_render(&NewRender {
-                id: render_id,
-                project_id: project.id,
-                project_version_id: version.id,
-                workflow_id,
-                status: "rendering".into(),
-                render_spec_hash: hash,
-                width: spec.width,
-                height: spec.height,
-                fps: spec.fps,
-            })
-            .await?;
         let task_id = self
             .start_task(TaskDescriptor {
                 workflow_id,
@@ -474,9 +707,28 @@ impl PipelineService {
                 model: "remotion",
             })
             .await?;
+        // 渲染任务 ID 来自持久化 generation_tasks，同一幂等键重试时保持不变。
+        let render_id = self
+            .repository
+            .start_render(&NewRender {
+                id: task_id,
+                project_id: project.id,
+                project_version_id: version.id,
+                workflow_id,
+                status: "rendering".into(),
+                render_spec_hash: hash.clone(),
+                width: spec.width,
+                height: spec.height,
+                fps: spec.fps,
+            })
+            .await;
+        let render_id = match render_id {
+            Ok(render_id) => render_id,
+            Err(error) => return self.fail_task(task_id, error).await,
+        };
         let request = RenderJobRequest {
             render_id,
-            output_key: format!("projects/{}/renders/{render_id}.mp4", project.id),
+            output_key: format!("projects/{}/renders/{hash}.mp4", project.id),
             spec,
         };
         let output = self.renderer.render(&request).await;
@@ -499,6 +751,9 @@ impl PipelineService {
                 Ok(cached.public_url)
             }
             Err(err) => {
+                self.repository
+                    .fail_render(render_id, &err.to_string())
+                    .await?;
                 self.repository.fail_task(task_id, &err.to_string()).await?;
                 Err(err)
             }
@@ -539,9 +794,28 @@ impl PipelineService {
                 idempotency_key: key.into(),
                 provider: Some(provider.into()),
                 model: Some(model.into()),
-                input_hash: short_hash(key.as_bytes()),
             })
             .await
+    }
+
+    async fn complete_cached_task<T: Serialize>(
+        &self,
+        task_id: Uuid,
+        value: &T,
+        usage: ProviderUsage,
+    ) -> AppResult<()> {
+        self.repository
+            .complete_task(task_id, value, Some(serde_json::to_value(usage)?))
+            .await
+    }
+
+    /// 无论错误发生在模型调用、响应校验、素材落盘还是元数据写入，都终结对应任务。
+    /// 这样排障时不会看到已经失败的工作流残留 `running` 任务。
+    async fn fail_task<T>(&self, task_id: Uuid, error: AppError) -> AppResult<T> {
+        self.repository
+            .fail_task(task_id, &error.to_string())
+            .await?;
+        Err(error)
     }
 
     async fn finish_task<T: Serialize>(
@@ -579,12 +853,26 @@ struct AssetDescriptor<'a> {
     metadata: Value,
 }
 
+fn spawn_scene_task(
+    tasks: &mut JoinSet<AppResult<GeneratedScene>>,
+    pipeline: PipelineService,
+    workflow_id: Uuid,
+    project: Project,
+    version: ProjectVersion,
+    scene: SceneRecord,
+    style: crate::domain::StyleBible,
+) {
+    tasks.spawn(async move {
+        pipeline
+            .generate_scene_assets(workflow_id, &project, &version, &scene, &style)
+            .await
+    });
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GeneratedScene {
     pub scene_id: Uuid,
     pub sequence: i32,
-    pub narration: String,
-    pub visual_type: VisualType,
     pub image_url: String,
     pub audio_url: String,
     pub on_screen_text: Option<String>,
@@ -593,12 +881,60 @@ pub struct GeneratedScene {
     pub captions: Vec<CaptionCue>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GeneratedAsset {
+    asset_id: Uuid,
+    object: StoredObject,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GeneratedSpeech {
+    asset: GeneratedAsset,
+    duration_ms: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct GeneratedCaptions {
+    asset_id: Uuid,
+    object: StoredObject,
+    cues: Vec<CaptionCue>,
+}
+
 #[derive(Serialize, Deserialize)]
 struct RenderCache {
     public_url: String,
 }
 
-fn validate_storyboard(storyboard: &StoryboardSpec) -> AppResult<()> {
+fn validate_script(script: &ScriptSpec) -> AppResult<()> {
+    if script.title.trim().is_empty()
+        || script.summary.trim().is_empty()
+        || script.visual_style.trim().is_empty()
+        || script.full_narration.trim().is_empty()
+        || script.sections.is_empty()
+    {
+        return Err(AppError::Validation("文稿关键字段不能为空".into()));
+    }
+    let section_narration = script
+        .sections
+        .iter()
+        .map(|section| section.narration.as_str())
+        .collect::<String>();
+    if compact_text(&section_narration) != compact_text(&script.full_narration) {
+        return Err(AppError::Validation(
+            "文稿 sections 的口播内容与 full_narration 不一致".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_storyboard(storyboard: &StoryboardSpec, script: &ScriptSpec) -> AppResult<()> {
+    if storyboard.style_bible.art_direction.trim().is_empty()
+        || storyboard.style_bible.color_palette.is_empty()
+        || storyboard.style_bible.image_rules.is_empty()
+        || storyboard.style_bible.negative_prompt.trim().is_empty()
+    {
+        return Err(AppError::Validation("分镜视觉规范不能为空".into()));
+    }
     if storyboard.scenes.is_empty() {
         return Err(AppError::Validation("分镜不能为空".into()));
     }
@@ -618,29 +954,76 @@ fn validate_storyboard(storyboard: &StoryboardSpec) -> AppResult<()> {
                 scene.sequence
             )));
         }
+        if scene.visual_prompt.trim().is_empty() {
+            return Err(AppError::Validation(format!(
+                "场景 {} 缺少画面提示词",
+                scene.sequence
+            )));
+        }
+    }
+    let storyboard_narration = storyboard
+        .scenes
+        .iter()
+        .map(|scene| scene.narration.as_str())
+        .collect::<String>();
+    if compact_text(&storyboard_narration) != compact_text(&script.full_narration) {
+        return Err(AppError::Validation(
+            "分镜口播合并后与审核文稿不一致".into(),
+        ));
     }
     Ok(())
 }
 
-fn short_hash(bytes: &[u8]) -> String {
-    blake3::hash(bytes).to_hex()[..16].to_owned()
+fn compact_text(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect()
 }
 
-fn parse_visual_type(value: &str) -> VisualType {
-    match value {
-        "infographic" => VisualType::Infographic,
-        "quote" => VisualType::Quote,
-        "title" => VisualType::Title,
-        "list" => VisualType::List,
-        _ => VisualType::Illustration,
+fn validate_captions(cues: &[CaptionCue], duration_ms: i64) -> AppResult<()> {
+    let mut previous_end = 0;
+    for (index, cue) in cues.iter().enumerate() {
+        if cue.text.trim().is_empty()
+            || cue.start_ms < 0
+            || cue.end_ms <= cue.start_ms
+            || cue.start_ms < previous_end
+            || cue.end_ms > duration_ms + 1_000
+        {
+            return Err(AppError::Validation(format!(
+                "字幕时间戳无效，错误位置 {}: {}-{}ms",
+                index + 1,
+                cue.start_ms,
+                cue.end_ms
+            )));
+        }
+        previous_end = cue.end_ms;
+    }
+    Ok(())
+}
+
+fn render_dimensions(aspect_ratio: &str) -> (i32, i32) {
+    match aspect_ratio {
+        "9:16" => (1080, 1920),
+        "1:1" => (1080, 1080),
+        _ => (1920, 1080),
     }
 }
 
-fn parse_transition(value: Option<&str>) -> TransitionKind {
+fn content_hash(bytes: &[u8]) -> String {
+    blake3::hash(bytes).to_hex().to_string()
+}
+
+fn stable_task_key(stage: &str, material: &str) -> String {
+    // Provider 和模型名称允许较长，统一哈希后可严格满足数据库 VARCHAR(256) 约束。
+    format!("{stage}:{}", blake3::hash(material.as_bytes()).to_hex())
+}
+
+fn parse_transition(value: &str) -> TransitionKind {
     match value {
-        Some("slide") => TransitionKind::Slide,
-        Some("wipe") => TransitionKind::Wipe,
-        Some("none") => TransitionKind::None,
+        "slide" => TransitionKind::Slide,
+        "wipe" => TransitionKind::Wipe,
+        "none" => TransitionKind::None,
         _ => TransitionKind::Fade,
     }
 }

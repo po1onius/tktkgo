@@ -145,6 +145,11 @@ button:disabled {
   margin: 12px 0;
   font-size: 30px;
 }
+.project-head-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
 .status {
   display: inline-flex;
   padding: 6px 10px;
@@ -250,5 +255,9 @@ button:disabled {
   }
   .project-head {
     flex-direction: column;
+  }
+  .project-head-actions {
+    width: 100%;
+    flex-wrap: wrap;
   }
 }
