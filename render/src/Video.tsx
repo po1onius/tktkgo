@@ -9,7 +9,7 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import type { CaptionCue, RenderScene, RenderSpec } from "./types.js";
+import type { CaptionCue, RenderScene, RenderSpec } from "./types";
 
 export const GeneratedVideo: React.FC<{ spec: RenderSpec }> = ({ spec }) => {
   return (

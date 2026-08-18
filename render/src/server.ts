@@ -6,7 +6,7 @@ import { bundle } from "@remotion/bundler";
 import { renderMedia, selectComposition } from "@remotion/renderer";
 import Fastify from "fastify";
 import pLimit from "p-limit";
-import { renderJobSchema, type RenderJob } from "./types.js";
+import { renderJobSchema, type RenderJob } from "./types";
 
 const currentDirectory = path.dirname(fileURLToPath(import.meta.url));
 const assetRoot = path.resolve(

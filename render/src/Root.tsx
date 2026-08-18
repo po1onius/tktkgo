@@ -1,7 +1,7 @@
 import React from "react";
 import { Composition } from "remotion";
-import { GeneratedVideo } from "./Video.js";
-import type { RenderSpec } from "./types.js";
+import { GeneratedVideo } from "./Video";
+import type { RenderSpec } from "./types";
 
 const emptySpec: RenderSpec = {
   project_id: "00000000-0000-4000-8000-000000000000",

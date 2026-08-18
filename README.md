@@ -25,15 +25,13 @@ Web -> Rust API -> PostgreSQL
 
 ## 本地启动
 
-要求：Rust 1.97+、Node.js 24+、pnpm 11+、PostgreSQL 18、Restate 1.7、FFmpeg/ffprobe。建议安装 Docker Compose；当前 Codex 执行环境没有 Docker，需要在你的开发机手动安装。
+要求：Rust 1.97+、Node.js 24+、pnpm 11+、Podman、Podman Compose、FFmpeg/ffprobe。PostgreSQL 18 和 Restate 1.7 通过 `compose.yaml` 运行，其余应用服务直接在宿主机构建和启动。
 
-1. 复制配置：`cp .env.example .env`，填写 `TKTKGO_OPENAI_API_KEY`。
-2. 启动基础设施：`docker compose up -d postgres restate`。
-3. 执行迁移：`diesel migration run --migration-dir backend/migrations`。
-4. 启动 API：`cargo run -p tktkgo-api`。
-5. 启动工作流服务：`cargo run -p tktkgo-workflow`。
-6. 注册工作流端点：`curl -X POST localhost:9070/deployments -H 'content-type: application/json' -d '{"uri":"http://host.docker.internal:9080"}'`。Linux 下请将地址替换为 Restate 容器能访问的宿主机地址。
-7. 安装并启动前端/渲染服务：`pnpm install && pnpm dev`。
+1. 执行 `make`。第一次运行会创建 `.env` 并提示填写 `TKTKGO_OPENAI_API_KEY`。
+2. 填写配置后再次执行 `make`，即可启动全部服务。
+3. 按 `Ctrl+C` 会停止本地应用和 Podman Compose 基础服务，数据库及 Restate 数据卷会保留。
+
+Makefile 只有一个 `dev` 目标，也是默认目标。它会使用 Podman Compose 启动 PostgreSQL 和 Restate，在宿主机安装依赖并构建 Rust、Web 和 Render 服务，随后启动全部应用服务并自动注册 Restate Workflow 端点。API 和 Workflow 启动时会自动执行嵌入式数据库迁移，不需要安装 Diesel CLI。
 
 API 默认监听 `http://localhost:8000`，Restate 服务端点监听 `http://localhost:9080`，渲染服务监听 `http://localhost:8090`，Web 监听 `http://localhost:3000`。
 
@@ -56,4 +54,3 @@ API 默认监听 `http://localhost:8000`，Restate 服务端点监听 `http://lo
 ## Restate Rust SDK 说明
 
 当前锁定 `restate-sdk = 0.11.1`，对应 Restate Server 1.7。Rust SDK 仍在积极开发，可能出现跨版本 API 变化，因此 Restate 宏和上下文只存在于 `backend/apps/workflow`，核心业务代码不依赖 Restate。
-
