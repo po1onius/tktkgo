@@ -1,4 +1,4 @@
-# 固定 Provider 网关的独立配置。运行 `make` 会复制本文件为 providers.toml。
+# 固定 Provider 网关的独立配置。首次部署时手动复制本文件为 providers.toml。
 [gateway]
 host = "127.0.0.1"
 port = 8110

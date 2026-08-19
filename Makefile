@@ -14,7 +14,7 @@ RESTATE_ADMIN_URL ?= http://127.0.0.1:9070
 # Restate 位于容器内，通过 Compose 配置的宿主机网关访问本地 Workflow。
 WORKFLOW_DEPLOYMENT_URI ?= http://host.docker.internal:9080
 
-.PHONY: dev provider
+.PHONY: dev
 
 dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 	@set -Eeuo pipefail; \
@@ -131,6 +131,3 @@ dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 	set -e; \
 	echo "[local] 检测到服务退出，退出码：$$status" >&2; \
 	exit "$$status"
-
-provider: ## 独立启动固定 Provider 网关
-	$(MAKE) -C provider start

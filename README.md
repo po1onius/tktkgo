@@ -36,9 +36,9 @@ Rust Pipeline 只依赖一个 `ModelGatewayClient` 和四个固定 HTTP 能力�
 
 ## 本地启动
 
-要求：Rust 1.97+、Node.js 24+、pnpm 11+、Podman、Podman Compose、FFmpeg/ffprobe。PostgreSQL 18 和 Restate 1.7 通过 `compose.yaml` 运行，其余应用服务直接在宿主机构建和启动。
+要求：Rust 1.97+、Node.js 24+、pnpm 11+、uv、Podman、Podman Compose、FFmpeg/ffprobe。PostgreSQL 18 和 Restate 1.7 通过 `compose.yaml` 运行，其余应用服务直接在宿主机构建和启动。
 
-1. 执行 `make provider`。第一次运行会创建 `provider/providers.toml`，填写所选远程 Provider 的 Key 和四类能力的可选模型后重新执行。
+1. 进入 `provider`，首次部署先复制 `providers.example.toml` 为 `providers.toml`，填写所选远程 Provider 的 Key 和四类能力的可选模型；执行 `uv sync --frozen` 后使用 `uv run --frozen python provider.py` 启动网关。
 2. 如果网关配置了本地模型，在各自终端进入 `local-models/faster-whisper` 或 `local-models/cosyvoice`，执行 `uv sync --frozen` 后使用 `uv run --frozen python provider.py` 启动。两者拥有独立 TOML、uv 环境和模型缓存，启动时会自动下载缺失权重；CosyVoice 首次准备官方源码和私有音色的方法见 [`local-models/README.md`](local-models/README.md)。
 3. 在另一个终端执行 `make`，启动基础设施和全部业务应用。各目标独立运行和停止，数据库及 Restate 数据卷会保留。
 
@@ -48,7 +48,7 @@ API 和 Web 默认统一监听 `http://localhost:8000`，Restate 服务端点监
 
 ### 使用本地口播和字幕模型
 
-`make provider` 只读取 `provider/providers.toml`，不会安装或启动本地模型；它会校验每类能力至少有一个模型、Provider 与能力匹配，以及被选中的远程 Provider 已配置 Key。本地执行服务只向网关暴露 HTTP 地址，网关通过健康响应确认实际模型和音色是否可用。
+Provider 网关进程只读取 `provider/providers.toml`，不会安装或启动本地模型；它会校验每类能力至少有一个模型、Provider 与能力匹配，以及被选中的远程 Provider 已配置 Key。本地执行服务只向网关暴露 HTTP 地址，网关通过健康响应确认实际模型和音色是否可用。
 
 faster-whisper 进程只读取 `local-models/faster-whisper/provider.toml`；CosyVoice 进程只读取 `local-models/cosyvoice/provider.toml` 和私有音色文件。三份配置互不引用。业务应用只保存 `TKTKGO_MODEL_GATEWAY_URL`，不会接触模型 API Key 或本地模型私有参数。
 
