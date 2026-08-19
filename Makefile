@@ -14,7 +14,7 @@ RESTATE_ADMIN_URL ?= http://127.0.0.1:9070
 # Restate 位于容器内，通过 Compose 配置的宿主机网关访问本地 Workflow。
 WORKFLOW_DEPLOYMENT_URI ?= http://host.docker.internal:9080
 
-.PHONY: dev provider faster-whisper cosyvoice
+.PHONY: dev provider
 
 dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 	@set -Eeuo pipefail; \
@@ -134,9 +134,3 @@ dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 
 provider: ## 独立启动固定 Provider 网关
 	$(MAKE) -C provider start
-
-faster-whisper: ## 独立部署并启动 faster-whisper
-	$(MAKE) -C local-models faster-whisper
-
-cosyvoice: ## 独立部署并启动 CosyVoice
-	$(MAKE) -C local-models cosyvoice

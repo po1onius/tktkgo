@@ -39,7 +39,7 @@ Rust Pipeline 只依赖一个 `ModelGatewayClient` 和四个固定 HTTP 能力�
 要求：Rust 1.97+、Node.js 24+、pnpm 11+、Podman、Podman Compose、FFmpeg/ffprobe。PostgreSQL 18 和 Restate 1.7 通过 `compose.yaml` 运行，其余应用服务直接在宿主机构建和启动。
 
 1. 执行 `make provider`。第一次运行会创建 `provider/providers.toml`，填写所选远程 Provider 的 Key 和四类能力的可选模型后重新执行。
-2. 如果网关配置了本地模型，在各自终端执行 `make faster-whisper` 或 `make cosyvoice`。两者拥有独立 TOML、环境和模型缓存，启动时会自动下载缺失权重。
+2. 如果网关配置了本地模型，在各自终端进入 `local-models/faster-whisper` 或 `local-models/cosyvoice`，执行 `uv sync --frozen` 后使用 `uv run --frozen python provider.py` 启动。两者拥有独立 TOML、uv 环境和模型缓存，启动时会自动下载缺失权重；CosyVoice 首次准备官方源码和私有音色的方法见 [`local-models/README.md`](local-models/README.md)。
 3. 在另一个终端执行 `make`，启动基础设施和全部业务应用。各目标独立运行和停止，数据库及 Restate 数据卷会保留。
 
 默认 `dev` 目标会使用 Podman Compose 启动 PostgreSQL 和 Restate，在宿主机安装依赖并构建 Rust、Web 和 Render 服务，随后启动应用服务并自动注册 Restate Workflow 端点。Web 使用 Next.js 静态导出，运行时由 Rust API 同源托管，不再启动独立的 Next.js 服务。API 和 Workflow 启动时会自动执行嵌入式数据库迁移，不需要安装 Diesel CLI。Provider 网关和两个本地模型均不属于应用进程生命周期。
@@ -50,7 +50,7 @@ API 和 Web 默认统一监听 `http://localhost:8000`，Restate 服务端点监
 
 `make provider` 只读取 `provider/providers.toml`，不会安装或启动本地模型；它会校验每类能力至少有一个模型、Provider 与能力匹配，以及被选中的远程 Provider 已配置 Key。本地执行服务只向网关暴露 HTTP 地址，网关通过健康响应确认实际模型和音色是否可用。
 
-`make faster-whisper` 只读取 `local-models/faster-whisper/provider.toml`；`make cosyvoice` 只读取 `local-models/cosyvoice/provider.toml` 和私有音色文件。三份配置互不引用。业务应用只保存 `TKTKGO_MODEL_GATEWAY_URL`，不会接触模型 API Key 或本地模型私有参数。
+faster-whisper 进程只读取 `local-models/faster-whisper/provider.toml`；CosyVoice 进程只读取 `local-models/cosyvoice/provider.toml` 和私有音色文件。三份配置互不引用。业务应用只保存 `TKTKGO_MODEL_GATEWAY_URL`，不会接触模型 API Key 或本地模型私有参数。
 
 新建项目时直接在前端分别选择文案、图片、口播和字幕的 Provider/模型组合。页面通过业务 API 代理的模型目录只允许选择当前可用组合。CosyVoice 的参考音频仍需人工准备，具体部署见 [`local-models/README.md`](local-models/README.md)。本地模型会在各自服务启动阶段下载并加载，健康检查成功后即可处理业务请求。
 
