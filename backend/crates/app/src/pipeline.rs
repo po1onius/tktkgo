@@ -290,17 +290,40 @@ impl PipelineService {
         scene: &SceneRecord,
         style: &crate::domain::StyleBible,
     ) -> AppResult<GeneratedScene> {
-        // 图片与口播互不依赖，可以并行执行；使用 join 等待两边都收口任务状态，
-        // 避免一边失败后取消另一边，使 generation_tasks 永久残留 running。
-        let (image, speech) = tokio::join!(
+        // 正确的依赖图是「图片」与「口播 -> 字幕强制对齐」两个并行分支。字幕只依赖
+        // 口播 WAV，不应等待图片；外层仍使用 join 等待两个分支都收口，避免一边失败
+        // 后取消另一边，使 generation_tasks 永久残留 running。
+        info!(
+            workflow_id = %workflow_id,
+            project_id = %project.id,
+            scene_id = %scene.id,
+            sequence = scene.sequence,
+            "场景素材并行分支开始"
+        );
+        let speech_and_captions = async {
+            let speech = self
+                .generate_speech_asset(workflow_id, project, version, scene)
+                .await?;
+            let captions = self
+                .generate_caption_asset(workflow_id, project, version, scene, &speech)
+                .await?;
+            Ok::<_, AppError>((speech, captions))
+        };
+        let (image, speech_and_captions) = tokio::join!(
             self.generate_image_asset(workflow_id, project, version, scene, style),
-            self.generate_speech_asset(workflow_id, project, version, scene),
+            speech_and_captions,
+        );
+        info!(
+            workflow_id = %workflow_id,
+            project_id = %project.id,
+            scene_id = %scene.id,
+            sequence = scene.sequence,
+            image_branch_succeeded = image.is_ok(),
+            speech_alignment_branch_succeeded = speech_and_captions.is_ok(),
+            "场景素材并行分支已收口"
         );
         let image = image?;
-        let speech = speech?;
-        let captions = self
-            .generate_caption_asset(workflow_id, project, version, scene, &speech)
-            .await?;
+        let (speech, captions) = speech_and_captions?;
 
         self.repository
             .mark_scene_ready(

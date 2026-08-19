@@ -68,7 +68,7 @@ WhisperX 进程只读取 `local-models/whisperx/provider.toml`；CosyVoice 进�
 2. 结构化生成 `ScriptSpec` 并保存项目版本。
 3. 如果项目要求审核，Workflow 使用持久化 Promise 等待审核信号。
 4. 生成 `StoryboardSpec` 和场景记录。
-5. 场景以有界并发生成素材；单个场景并行生成插图和 WAV 口播，随后把确定口播原文强制对齐为字符级时间戳。
+5. 场景以有界并发生成素材；单个场景并行执行“生成插图”与“生成 WAV 口播后立即强制对齐原文”两个分支，等待两边收口后保存场景素材。
 6. Rust 把时间戳聚合为固定句级字幕块，ffprobe 读取真实口播时长并生成确定性的 `RenderSpec`。
 7. 调用 Remotion 服务渲染 MP4，并保存 Render 记录。
 
