@@ -1,6 +1,11 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := dev
 
+# 始终以主 Makefile 所在目录作为项目根目录，避免从其他目录执行 make，或 pnpm
+# 切换到子包工作目录后，把同一个相对素材目录解析成不同位置。
+PROJECT_ROOT := $(patsubst %/,%,$(dir $(abspath $(firstword $(MAKEFILE_LIST)))))
+ASSET_ROOT ?= $(PROJECT_ROOT)/storage
+
 PODMAN ?= podman
 COMPOSE_FILE ?= compose.yaml
 CARGO ?= cargo
@@ -33,6 +38,10 @@ dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 		echo "[env] 已创建应用配置 $(ENV_FILE)"; \
 	fi; \
 	set -a; source "$(ENV_FILE)"; set +a; \
+	# 素材目录属于项目本地运行布局，由 Makefile 统一管理。这里在加载 .env 后覆盖， \
+	# 确保 Rust API、Workflow 和位于 render 子目录运行的 Remotion 使用同一目录。 \
+	export TKTKGO_ASSET_ROOT="$(ASSET_ROOT)"; \
+	echo "[config] 统一素材目录：$$TKTKGO_ASSET_ROOT"; \
 	api_pid=""; \
 	workflow_pid=""; \
 	render_pid=""; \

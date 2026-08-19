@@ -44,6 +44,8 @@ Rust Pipeline 只依赖一个 `ModelGatewayClient` 和四个固定 HTTP 能力�
 
 默认 `dev` 目标会使用 Podman Compose 启动 PostgreSQL 和 Restate，在宿主机安装依赖并构建 Rust、Web 和 Render 服务，随后启动应用服务并自动注册 Restate Workflow 端点。Web 使用 Next.js 静态导出，运行时由 Rust API 同源托管，不再启动独立的 Next.js 服务。API 和 Workflow 启动时会自动执行嵌入式数据库迁移，不需要安装 Diesel CLI。Provider 网关和两个本地模型均不属于应用进程生命周期。
 
+素材目录由 Makefile 统一设为项目根目录下的 `storage`。Makefile 会根据自身位置计算项目根目录，并向 API、Workflow 和 Remotion 导出同一个绝对路径，避免各服务工作目录不同导致素材与渲染产物被写入两套 `storage`。如需调整，可执行 `make ASSET_ROOT=/absolute/path`。
+
 API 和 Web 默认统一监听 `http://localhost:8000`，Restate 服务端点监听 `http://localhost:9080`，渲染服务监听 `http://localhost:8090`。Node.js/pnpm 仍用于构建 Web 和运行 Remotion，但 Web 本身不需要 Node.js 运行时服务。
 
 Rust 服务日志同时输出到终端和 `TKTKGO_LOG_ROOT`（默认 `./logs`）。`api.log` 与 `workflow.log` 保存对应服务的完整 JSON Lines 日志；包含 `workflow_id` 的事件还会写入 `logs/tasks/<workflow_id>.log`，一个视频生成任务对应一个文件，Restate 重放和阶段重试继续追加到原文件。可使用 `tail -f logs/tasks/<workflow_id>.log` 实时查看指定任务。
