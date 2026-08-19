@@ -12,6 +12,7 @@ pub struct Settings {
     pub public_asset_base_url: String,
     pub asset_root: PathBuf,
     pub web_root: PathBuf,
+    pub log_root: PathBuf,
     pub model_gateway_url: String,
 }
 
@@ -34,6 +35,7 @@ impl Settings {
             )),
             asset_root: PathBuf::from(value("TKTKGO_ASSET_ROOT", "./storage")),
             web_root: PathBuf::from(value("TKTKGO_WEB_ROOT", "./web/out")),
+            log_root: PathBuf::from(value("TKTKGO_LOG_ROOT", "./logs")),
             model_gateway_url: trim_url(value("TKTKGO_MODEL_GATEWAY_URL", "http://127.0.0.1:8110")),
         })
     }

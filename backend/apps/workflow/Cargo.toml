@@ -10,5 +10,4 @@ restate-sdk.workspace = true
 tktkgo-app = { path = "../../crates/app" }
 tokio.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
 uuid.workspace = true

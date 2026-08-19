@@ -4,6 +4,7 @@ use restate_sdk::prelude::*;
 use tktkgo_app::{
     Repository, Settings, create_pool,
     domain::{ScriptReviewInput, WorkflowInput, WorkflowResult},
+    init_logging,
     pipeline::PipelineService,
     providers::ModelGatewayClient,
     render::RenderClient,
@@ -11,7 +12,6 @@ use tktkgo_app::{
     storage::LocalAssetStore,
 };
 use tracing::{error, info};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -359,7 +359,7 @@ async fn fail_workflow(
     cause: TerminalError,
 ) -> HandlerResult<Json<WorkflowResult>> {
     let message = cause.to_string();
-    error!(project_id = %project_id, error = %message, "视频生成工作流失败");
+    error!(workflow_id = %workflow_id, project_id = %project_id, error = %message, "视频生成工作流失败");
     let saved_message = message.clone();
     ctx.run(move || async move {
         repository
@@ -402,8 +402,16 @@ fn render_retry() -> RunRetryPolicy {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logging();
     let settings = Settings::from_env()?;
+    init_logging("workflow", &settings.log_root)?;
+    let result = run(settings).await;
+    if let Err(error) = &result {
+        error!(error = %error, "tktkgo Workflow 服务异常退出");
+    }
+    result
+}
+
+async fn run(settings: Settings) -> Result<(), Box<dyn std::error::Error>> {
     run_migrations(settings.database_url.clone()).await?;
     let repository = Repository::new(create_pool(&settings.database_url).await?);
     // Workflow 只依赖固定的 Model Gateway 协议，不包含任何模型厂商 SDK 或私有参数。
@@ -436,14 +444,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .listen_and_serve(settings.workflow_addr)
     .await;
+    info!("tktkgo Restate 工作流服务已停止");
     Ok(())
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("TKTKGO_LOG")
-        .unwrap_or_else(|_| "info,tktkgo=debug".into());
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().json().flatten_event(true))
-        .init();
 }

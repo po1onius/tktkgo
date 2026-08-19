@@ -13,6 +13,7 @@ use serde_json::json;
 use tktkgo_app::{
     AppError, Repository, Settings, create_pool,
     domain::{CreateProjectRequest, Project, ScriptReviewInput, WorkflowInput},
+    init_logging,
     providers::{ModelGatewayClient, ProviderCatalog, ProviderOption},
     run_migrations,
 };
@@ -22,7 +23,6 @@ use tower_http::{
     trace::TraceLayer,
 };
 use tracing::{info, instrument, warn};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
 #[derive(Clone)]
@@ -35,8 +35,16 @@ struct ApiState {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_logging();
     let settings = Settings::from_env()?;
+    init_logging("api", &settings.log_root)?;
+    let result = run(settings).await;
+    if let Err(error) = &result {
+        tracing::error!(error = %error, "tktkgo API 异常退出");
+    }
+    result
+}
+
+async fn run(settings: Settings) -> Result<(), Box<dyn std::error::Error>> {
     validate_web_root(&settings).await?;
     run_migrations(settings.database_url.clone()).await?;
     let repository = Repository::new(create_pool(&settings.database_url).await?);
@@ -82,6 +90,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+    info!("tktkgo API 已停止");
     Ok(())
 }
 
@@ -103,15 +112,6 @@ async fn validate_web_root(settings: &Settings) -> Result<(), AppError> {
     }
     info!(web_index = %index_path.display(), "Web 静态构建产物校验完成");
     Ok(())
-}
-
-fn init_logging() {
-    let filter = tracing_subscriber::EnvFilter::try_from_env("TKTKGO_LOG")
-        .unwrap_or_else(|_| "info,tktkgo=debug".into());
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(tracing_subscriber::fmt::layer().json().flatten_event(true))
-        .init();
 }
 
 async fn health() -> Json<serde_json::Value> {

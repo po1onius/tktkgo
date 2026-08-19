@@ -2839,7 +2839,6 @@ dependencies = [
  "tokio",
  "tower-http",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 
@@ -2861,6 +2860,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -2872,7 +2872,6 @@ dependencies = [
  "tktkgo-app",
  "tokio",
  "tracing",
- "tracing-subscriber",
  "uuid",
 ]
 

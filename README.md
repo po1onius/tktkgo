@@ -46,6 +46,8 @@ Rust Pipeline 只依赖一个 `ModelGatewayClient` 和四个固定 HTTP 能力�
 
 API 和 Web 默认统一监听 `http://localhost:8000`，Restate 服务端点监听 `http://localhost:9080`，渲染服务监听 `http://localhost:8090`。Node.js/pnpm 仍用于构建 Web 和运行 Remotion，但 Web 本身不需要 Node.js 运行时服务。
 
+Rust 服务日志同时输出到终端和 `TKTKGO_LOG_ROOT`（默认 `./logs`）。`api.log` 与 `workflow.log` 保存对应服务的完整 JSON Lines 日志；包含 `workflow_id` 的事件还会写入 `logs/tasks/<workflow_id>.log`，一个视频生成任务对应一个文件，Restate 重放和阶段重试继续追加到原文件。可使用 `tail -f logs/tasks/<workflow_id>.log` 实时查看指定任务。
+
 ### 使用本地口播和字幕模型
 
 Provider 网关进程只读取 `provider/providers.toml`，不会安装或启动本地模型；它会校验每类能力至少有一个模型、Provider 与能力匹配，以及被选中的远程 Provider 已配置 Key。本地执行服务只向网关暴露 HTTP 地址，网关通过健康响应确认实际模型和音色是否可用。
