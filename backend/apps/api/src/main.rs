@@ -333,10 +333,11 @@ async fn dispatch_generation(state: &ApiState, project_id: Uuid) -> Result<Uuid,
         "{}/VideoGenerationWorkflow/{}/run/send",
         state.settings.restate_ingress_url, workflow_id
     );
+    // Workflow Key 已经是 Restate Workflow Handler 的幂等边界；Workflow 请求如果
+    // 同时携带 idempotency-key Header，Restate Ingress 会明确返回 400。
     let response = state
         .http
         .post(url)
-        .header("idempotency-key", workflow_id.to_string())
         .json(&WorkflowInput { project_id })
         .send()
         .await;

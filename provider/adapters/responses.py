@@ -82,17 +82,30 @@ async def generate_structured_text(
 
 
 def output_text(payload: dict[str, Any]) -> str | None:
+    # 部分 Responses API 实现会提供便捷的顶层 output_text，有值时优先使用。
     direct = payload.get("output_text")
-    if isinstance(direct, str):
+    if isinstance(direct, str) and direct.strip():
         return direct
     outputs = payload.get("output")
     if not isinstance(outputs, list):
         return None
     for output in outputs:
-        if not isinstance(output, dict) or not isinstance(output.get("content"), list):
+        # DeepSeek 等推理模型会在 message 之前返回 reasoning item，其中也有
+        # text 字段。只接受协议定义的 message/output_text，避免把推理过程
+        # 误当作 JSON Schema 结果解析。
+        if (
+            not isinstance(output, dict)
+            or output.get("type") != "message"
+            or not isinstance(output.get("content"), list)
+        ):
             continue
         for content in output["content"]:
-            if isinstance(content, dict) and isinstance(content.get("text"), str):
+            if (
+                isinstance(content, dict)
+                and content.get("type") == "output_text"
+                and isinstance(content.get("text"), str)
+                and content["text"].strip()
+            ):
                 return content["text"]
     return None
 
