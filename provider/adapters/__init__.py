@@ -6,14 +6,14 @@ Provider 路由以及最终媒体校验仍由 provider.py 统一负责。
 
 from .cosyvoice import CosyVoiceAdapter
 from .deepseek import DeepSeekAdapter
-from .faster_whisper import FasterWhisperAdapter
 from .openai import OpenAIAdapter
 from .pic2api import Pic2APIAdapter
+from .whisperx import WhisperXAdapter
 
 __all__ = [
     "CosyVoiceAdapter",
     "DeepSeekAdapter",
-    "FasterWhisperAdapter",
     "OpenAIAdapter",
     "Pic2APIAdapter",
+    "WhisperXAdapter",
 ]

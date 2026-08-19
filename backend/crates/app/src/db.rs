@@ -89,8 +89,8 @@ impl Repository {
             voice: &request.voice,
             speech_provider: &request.speech_provider,
             speech_model: &request.speech_model,
-            transcription_provider: &request.transcription_provider,
-            transcription_model: &request.transcription_model,
+            alignment_provider: &request.alignment_provider,
+            alignment_model: &request.alignment_model,
             require_script_review: request.require_script_review,
         };
         let mut conn = self.connection().await?;
@@ -107,8 +107,8 @@ impl Repository {
             image_model = request.image_model,
             speech_provider = request.speech_provider,
             speech_model = request.speech_model,
-            transcription_provider = request.transcription_provider,
-            transcription_model = request.transcription_model,
+            alignment_provider = request.alignment_provider,
+            alignment_model = request.alignment_model,
             "项目已创建"
         );
         Ok(project)

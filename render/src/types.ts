@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const captionCueSchema = z
+export const captionBlockSchema = z
   .object({
     text: z.string().trim().min(1),
     start_ms: z.number().int().nonnegative(),
@@ -20,7 +20,7 @@ export const renderSceneSchema = z.object({
   audio_url: z.url(),
   on_screen_text: z.string().nullable(),
   transition: z.enum(["fade", "slide", "wipe", "none"]),
-  captions: z.array(captionCueSchema),
+  caption_blocks: z.array(captionBlockSchema).min(1).max(1000),
 });
 
 export const renderSpecSchema = z
@@ -55,18 +55,18 @@ export const renderSpecSchema = z
         (scene.duration_in_frames / spec.fps) * 1000,
       );
       let previousEndMs = 0;
-      scene.captions.forEach((cue, cueIndex) => {
+      scene.caption_blocks.forEach((block, blockIndex) => {
         if (
-          cue.start_ms < previousEndMs ||
-          cue.end_ms > sceneDurationMs + 1000
+          block.start_ms < previousEndMs ||
+          block.end_ms > sceneDurationMs + 1000
         ) {
           context.addIssue({
             code: "custom",
             message: "字幕必须按时间排序且不能超出场景时长",
-            path: ["scenes", sceneIndex, "captions", cueIndex],
+            path: ["scenes", sceneIndex, "caption_blocks", blockIndex],
           });
         }
-        previousEndMs = cue.end_ms;
+        previousEndMs = block.end_ms;
       });
       expectedStartFrame += scene.duration_in_frames;
     });
@@ -78,7 +78,7 @@ export const renderJobSchema = z.object({
   spec: renderSpecSchema,
 });
 
-export type CaptionCue = z.infer<typeof captionCueSchema>;
+export type CaptionBlock = z.infer<typeof captionBlockSchema>;
 export type RenderScene = z.infer<typeof renderSceneSchema>;
 export type RenderSpec = z.infer<typeof renderSpecSchema>;
 export type RenderJob = z.infer<typeof renderJobSchema>;

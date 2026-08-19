@@ -31,8 +31,8 @@ class TextResult:
 
 
 @dataclass(frozen=True)
-class TranscriptionResult:
-    """词级字幕结果；具体字段随后仍由网关 Pydantic 协议校验。"""
+class AlignmentResult:
+    """确定原文的强制对齐结果；具体字段随后仍由网关协议校验。"""
 
     cues: list[dict[str, Any]]
     request_id: str

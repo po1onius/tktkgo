@@ -8,7 +8,7 @@
 | `POST /v1/text/generate` | Provider、模型、提示词、JSON Schema | `{output, usage}` |
 | `POST /v1/images/generate` | 提示词、宽、高、质量 | `image/png` 二进制 |
 | `POST /v1/audio/speech` | 文本、音色、WAV 格式 | `audio/wav` 二进制 |
-| `POST /v1/audio/transcribe` | WAV、语言上下文 | `{cues, usage}` |
+| `POST /v1/audio/align` | WAV、确定口播原文 | `{cues, usage}` |
 
 每个生成请求都必须携带 `provider`、`model` 和 `request_id`。二进制响应通过 `X-Provider`、`X-Model`、`X-Request-Id`、`X-Latency-Ms` 返回元数据；失败使用非 2xx 状态和 JSON `detail`。
 
@@ -29,7 +29,7 @@ uv sync --frozen
 uv run --frozen python provider.py
 ```
 
-网关不会安装、下载或拉起本地模型。CosyVoice 和 faster-whisper 只以普通 HTTP 上游存在，部署说明见 [`../local-models/README.md`](../local-models/README.md)。
+网关不会安装、下载或拉起本地模型。CosyVoice 和 WhisperX 强制对齐服务只以普通 HTTP 上游存在，部署说明见 [`../local-models/README.md`](../local-models/README.md)。
 
 图片 Adapter 会先选择供应商支持的最接近画幅，再由 [`media_adapter.py`](media_adapter.py) 等比缩放、居中裁剪成请求的精确宽高；口播响应也会在返回前完成 WAV 解码校验。Pic2API Adapter 固定使用 `gpt-image-2` 和已确认支持的 1024×1024 上游尺寸，从 `choices[].message.content` 的 Markdown 图片语法中提取 URL、下载图片后再进入同一媒体适配流程。
 

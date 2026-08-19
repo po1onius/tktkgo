@@ -194,9 +194,9 @@ async fn ensure_requested_providers_available(
     )?;
     ensure_catalog_choice(
         "字幕",
-        &catalog.transcription,
-        &request.transcription_provider,
-        &request.transcription_model,
+        &catalog.alignment,
+        &request.alignment_provider,
+        &request.alignment_model,
     )?;
     Ok(())
 }
@@ -339,9 +339,9 @@ async fn dispatch_generation(state: &ApiState, project_id: Uuid) -> Result<Uuid,
     )?;
     ensure_catalog_choice(
         "字幕",
-        &catalog.transcription,
-        &project.transcription_provider,
-        &project.transcription_model,
+        &catalog.alignment,
+        &project.alignment_provider,
+        &project.alignment_model,
     )?;
     // Repository 使用条件 UPDATE 原子校验项目状态，避免并发请求同时通过检查。
     let workflow_id = Uuid::new_v4();

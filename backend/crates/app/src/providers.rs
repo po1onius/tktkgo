@@ -33,7 +33,7 @@ pub struct ProviderCatalog {
     pub text: Vec<ProviderOption>,
     pub image: Vec<ProviderOption>,
     pub speech: Vec<ProviderOption>,
-    pub transcription: Vec<ProviderOption>,
+    pub alignment: Vec<ProviderOption>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -134,7 +134,7 @@ struct GatewayTextOutput<T> {
 }
 
 #[derive(Deserialize)]
-struct GatewayTranscriptionOutput {
+struct GatewayAlignmentOutput {
     cues: Vec<CaptionCue>,
     usage: ProviderUsage,
 }
@@ -284,20 +284,19 @@ impl ModelGatewayClient {
             .part("file", audio);
         let response = self
             .client
-            .post(format!("{}/v1/audio/transcribe", self.base_url))
+            .post(format!("{}/v1/audio/align", self.base_url))
             .multipart(form)
             .send()
             .await
             .map_err(gateway_error)?;
         let body = checked_bytes(response).await?;
-        let output: GatewayTranscriptionOutput =
-            serde_json::from_slice(&body).map_err(|error| {
-                AppError::external("model-gateway", format!("字幕响应解析失败: {error}"))
-            })?;
+        let output: GatewayAlignmentOutput = serde_json::from_slice(&body).map_err(|error| {
+            AppError::external("model-gateway", format!("字幕对齐响应解析失败: {error}"))
+        })?;
         if output.cues.is_empty() {
             return Err(AppError::external(
                 "model-gateway",
-                "字幕响应没有词级时间戳",
+                "字幕对齐响应没有字符级时间戳",
             ));
         }
         Ok(ProviderOutput {

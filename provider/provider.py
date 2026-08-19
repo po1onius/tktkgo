@@ -16,9 +16,9 @@ import httpx
 from adapters import (
     CosyVoiceAdapter,
     DeepSeekAdapter,
-    FasterWhisperAdapter,
     OpenAIAdapter,
     Pic2APIAdapter,
+    WhisperXAdapter,
 )
 from config import load_config
 from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
@@ -40,7 +40,6 @@ openai_adapter = OpenAIAdapter(
     text_models=settings.models_for("text", "openai"),
     image_models=settings.models_for("image", "openai"),
     speech_models=settings.models_for("speech", "openai"),
-    transcription_models=settings.models_for("transcription", "openai"),
 )
 deepseek_adapter = DeepSeekAdapter(
     base_url=settings.providers.deepseek.base_url,
@@ -53,9 +52,7 @@ pic2api_adapter = Pic2APIAdapter(
     image_models=settings.models_for("image", "pic2api"),
 )
 cosyvoice_adapter = CosyVoiceAdapter(base_url=settings.providers.cosy_voice.base_url)
-faster_whisper_adapter = FasterWhisperAdapter(
-    base_url=settings.providers.faster_whisper.base_url
-)
+whisperx_adapter = WhisperXAdapter(base_url=settings.providers.whisperx.base_url)
 
 
 class ProviderOption(BaseModel):
@@ -70,7 +67,7 @@ class ModelCatalog(BaseModel):
     text: list[ProviderOption]
     image: list[ProviderOption]
     speech: list[ProviderOption]
-    transcription: list[ProviderOption]
+    alignment: list[ProviderOption]
 
 
 class TextRequest(BaseModel):
@@ -127,12 +124,12 @@ async def lifespan(_: FastAPI):
     state.client = httpx.AsyncClient(timeout=httpx.Timeout(30 * 60, connect=10))
     logger.info(
         "模型网关已启动 text_models=%s image_models=%s speech_models=%s "
-        "transcription_models=%s openai_configured=%s deepseek_configured=%s "
+        "alignment_models=%s openai_configured=%s deepseek_configured=%s "
         "pic2api_configured=%s",
         settings.models.text,
         settings.models.image,
         settings.models.speech,
-        settings.models.transcription,
+        settings.models.alignment,
         openai_adapter.available,
         deepseek_adapter.available,
         pic2api_adapter.available,
@@ -182,22 +179,22 @@ async def health() -> dict[str, str]:
 
 @app.get("/v1/models", response_model=ModelCatalog)
 async def models() -> ModelCatalog:
-    cosyvoice, faster_whisper = await asyncio.gather(
+    cosyvoice, whisperx = await asyncio.gather(
         cosyvoice_adapter.health(client())
         if settings.models_for("speech", "cosy_voice")
         else asyncio.sleep(0, result=None),
-        faster_whisper_adapter.health(client())
-        if settings.models_for("transcription", "faster_whisper")
+        whisperx_adapter.health(client())
+        if settings.models_for("alignment", "whisperx")
         else asyncio.sleep(0, result=None),
     )
     logger.info(
         "模型目录刷新完成 openai_available=%s deepseek_available=%s pic2api_available=%s "
-        "cosyvoice_available=%s faster_whisper_available=%s",
+        "cosyvoice_available=%s whisperx_available=%s",
         openai_adapter.available,
         deepseek_adapter.available,
         pic2api_adapter.available,
         bool(cosyvoice),
-        bool(faster_whisper),
+        bool(whisperx),
     )
     return ModelCatalog(
         text=[
@@ -260,23 +257,14 @@ async def models() -> ModelCatalog:
             )
             for model in settings.models_for("speech", "cosy_voice")
         ],
-        transcription=[
+        alignment=[
             ProviderOption(
-                id=openai_adapter.provider_id,
-                label=openai_adapter.label,
+                id=whisperx_adapter.provider_id,
+                label=whisperx_adapter.label,
                 model=model,
-                available=openai_adapter.available,
+                available=bool(whisperx and whisperx.get("model") == model),
             )
-            for model in openai_adapter.transcription_models
-        ]
-        + [
-            ProviderOption(
-                id=faster_whisper_adapter.provider_id,
-                label=faster_whisper_adapter.label,
-                model=model,
-                available=bool(faster_whisper and faster_whisper.get("model") == model),
-            )
-            for model in settings.models_for("transcription", "faster_whisper")
+            for model in settings.models_for("alignment", "whisperx")
         ],
     )
 
@@ -419,8 +407,8 @@ async def generate_speech(request: SpeechRequest) -> Response:
     )
 
 
-@app.post("/v1/audio/transcribe")
-async def transcribe(
+@app.post("/v1/audio/align")
+async def align_audio(
     file: Annotated[UploadFile, File()],
     provider: Annotated[str, Form()],
     model: Annotated[str, Form()],
@@ -431,7 +419,7 @@ async def transcribe(
     if not audio:
         raise HTTPException(status_code=422, detail="上传音频不能为空")
     logger.info(
-        "开始生成字幕 request_id=%s provider=%s model=%s audio_bytes=%d canonical_chars=%d",
+        "开始强制对齐字幕 request_id=%s provider=%s model=%s audio_bytes=%d canonical_chars=%d",
         request_id,
         provider,
         model,
@@ -439,16 +427,8 @@ async def transcribe(
         len(canonical_text),
     )
     started = time.perf_counter()
-    if provider == openai_adapter.provider_id:
-        result = await openai_adapter.transcribe(
-            client(),
-            model=model,
-            audio=audio,
-            canonical_text=canonical_text,
-            request_id=request_id,
-        )
-    elif provider == faster_whisper_adapter.provider_id:
-        result = await faster_whisper_adapter.transcribe(
+    if provider == whisperx_adapter.provider_id:
+        result = await whisperx_adapter.align(
             client(),
             model=model,
             audio=audio,
@@ -457,11 +437,11 @@ async def transcribe(
         )
     else:
         raise HTTPException(
-            status_code=422, detail=f"不支持的字幕 Provider: {provider}"
+            status_code=422, detail=f"不支持的强制对齐 Provider: {provider}"
         )
     cues = [CaptionCue.model_validate(cue) for cue in result.cues]
     if not cues:
-        raise HTTPException(status_code=502, detail=f"{provider} 未返回词级时间戳")
+        raise HTTPException(status_code=502, detail=f"{provider} 未返回字符级时间戳")
     return {
         "cues": [cue.model_dump() for cue in cues],
         "usage": {

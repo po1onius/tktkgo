@@ -1,4 +1,4 @@
-"""OpenAI 文本、图片、口播和字幕 Adapter。"""
+"""OpenAI 文本、图片和口播 Adapter。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from fastapi import HTTPException
 from .common import (
     BinaryResult,
     TextResult,
-    TranscriptionResult,
     checked,
     image_prompt,
     json_object,
@@ -36,14 +35,12 @@ class OpenAIAdapter:
         text_models: list[str],
         image_models: list[str],
         speech_models: list[str],
-        transcription_models: list[str],
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.text_models = list(text_models)
         self.image_models = list(image_models)
         self.speech_models = list(speech_models)
-        self.transcription_models = list(transcription_models)
 
     @property
     def available(self) -> bool:
@@ -181,62 +178,8 @@ class OpenAIAdapter:
             request_id=response.headers.get("x-request-id", request_id),
         )
 
-    async def transcribe(
-        self,
-        client: httpx.AsyncClient,
-        *,
-        model: str,
-        audio: bytes,
-        canonical_text: str,
-        request_id: str,
-    ) -> TranscriptionResult:
-        self._require_model(model, self.transcription_models, "字幕")
-        response = await checked(
-            await client.post(
-                f"{self.base_url}/audio/transcriptions",
-                headers=self._headers(request_id),
-                data={
-                    "model": model,
-                    "response_format": "verbose_json",
-                    "timestamp_granularities[]": "word",
-                    "prompt": canonical_text,
-                },
-                files={"file": ("speech.wav", audio, "audio/wav")},
-            ),
-            self.provider_id,
-        )
-        payload = json_object(response, "OpenAI")
-        words = payload.get("words")
-        cues: list[dict[str, Any]] = []
-        if isinstance(words, list):
-            for word in words:
-                if not isinstance(word, dict):
-                    continue
-                text = str(word.get("word", "")).strip()
-                start = self._optional_float(word.get("start"))
-                end = self._optional_float(word.get("end"))
-                if text and start is not None and end is not None and end > start:
-                    cues.append(
-                        {
-                            "text": text,
-                            "start_ms": round(start * 1000),
-                            "end_ms": round(end * 1000),
-                        }
-                    )
-        return TranscriptionResult(
-            cues=cues,
-            request_id=response.headers.get("x-request-id", request_id),
-        )
-
     @staticmethod
     def _image_size(width: int, height: int) -> str:
         if width == height:
             return "1024x1024"
         return "1024x1536" if height > width else "1536x1024"
-
-    @staticmethod
-    def _optional_float(value: Any) -> float | None:
-        try:
-            return float(value)
-        except (TypeError, ValueError):
-            return None

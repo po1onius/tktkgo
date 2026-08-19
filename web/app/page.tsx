@@ -20,8 +20,8 @@ type Project = {
   voice: string;
   speech_provider: string;
   speech_model: string;
-  transcription_provider: string;
-  transcription_model: string;
+  alignment_provider: string;
+  alignment_model: string;
   require_script_review: boolean;
   status: string;
   current_version: number;
@@ -50,14 +50,14 @@ type ProviderCatalog = {
   text: ProviderOption[];
   image: ProviderOption[];
   speech: ProviderOption[];
-  transcription: ProviderOption[];
+  alignment: ProviderOption[];
 };
 
 const emptyProviders: ProviderCatalog = {
   text: [],
   image: [],
   speech: [],
-  transcription: [],
+  alignment: [],
 };
 
 function optionValue(option: ProviderOption): string {
@@ -93,7 +93,7 @@ export default function Home() {
   const [textSelection, setTextSelection] = useState("");
   const [imageSelection, setImageSelection] = useState("");
   const [speechSelection, setSpeechSelection] = useState("");
-  const [transcriptionSelection, setTranscriptionSelection] = useState("");
+  const [alignmentSelection, setAlignmentSelection] = useState("");
   const [voice, setVoice] = useState("");
 
   useEffect(() => {
@@ -103,7 +103,7 @@ export default function Home() {
         setTextSelection(firstAvailable(catalog.text));
         setImageSelection(firstAvailable(catalog.image));
         setSpeechSelection(firstAvailable(catalog.speech));
-        setTranscriptionSelection(firstAvailable(catalog.transcription));
+        setAlignmentSelection(firstAvailable(catalog.alignment));
         console.info("provider catalog loaded", { catalog });
       })
       .catch((cause) => {
@@ -117,10 +117,10 @@ export default function Home() {
       (provider) => optionValue(provider) === speechSelection,
     ) ?? providers.speech[0];
   const voices = selectedSpeech?.voices ?? [];
-  const selectedTranscription =
-    providers.transcription.find(
-      (provider) => optionValue(provider) === transcriptionSelection,
-    ) ?? providers.transcription[0];
+  const selectedAlignment =
+    providers.alignment.find(
+      (provider) => optionValue(provider) === alignmentSelection,
+    ) ?? providers.alignment[0];
   const selectedText =
     providers.text.find(
       (provider) => optionValue(provider) === textSelection,
@@ -133,7 +133,7 @@ export default function Home() {
     selectedText?.available &&
     selectedImage?.available &&
     selectedSpeech?.available &&
-    selectedTranscription?.available &&
+    selectedAlignment?.available &&
     voice,
   );
 
@@ -190,7 +190,7 @@ export default function Home() {
         !selectedText ||
         !selectedImage ||
         !selectedSpeech ||
-        !selectedTranscription
+        !selectedAlignment
       ) {
         throw new Error("模型目录尚未就绪，请先启动 make provider");
       }
@@ -209,8 +209,8 @@ export default function Home() {
           voice: data.get("voice"),
           speech_provider: selectedSpeech.id,
           speech_model: selectedSpeech.model,
-          transcription_provider: selectedTranscription.id,
-          transcription_model: selectedTranscription.model,
+          alignment_provider: selectedAlignment.id,
+          alignment_model: selectedAlignment.model,
           require_script_review: true,
           auto_start: true,
         }),
@@ -400,16 +400,16 @@ export default function Home() {
                 </select>
               </label>
               <label>
-                字幕 Provider
+                字幕对齐 Provider
                 <select
-                  name="transcriptionProvider"
-                  value={transcriptionSelection}
+                  name="alignmentProvider"
+                  value={alignmentSelection}
                   onChange={(event) =>
-                    setTranscriptionSelection(event.target.value)
+                    setAlignmentSelection(event.target.value)
                   }
-                  disabled={!providers.transcription.length}
+                  disabled={!providers.alignment.length}
                 >
-                  {providers.transcription.map((provider) => (
+                  {providers.alignment.map((provider) => (
                     <option
                       key={`${provider.id}/${provider.model}`}
                       value={optionValue(provider)}
@@ -473,8 +473,7 @@ export default function Home() {
               口播 {project.speech_provider}/{project.speech_model}
             </span>
             <span>
-              字幕 {project.transcription_provider}/
-              {project.transcription_model}
+              字幕对齐 {project.alignment_provider}/{project.alignment_model}
             </span>
           </div>
           {project.error_message ? (

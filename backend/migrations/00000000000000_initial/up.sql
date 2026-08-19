@@ -12,8 +12,8 @@ CREATE TABLE projects (
     voice VARCHAR(64) NOT NULL,
     speech_provider VARCHAR(64) NOT NULL,
     speech_model VARCHAR(128) NOT NULL,
-    transcription_provider VARCHAR(64) NOT NULL,
-    transcription_model VARCHAR(128) NOT NULL,
+    alignment_provider VARCHAR(64) NOT NULL,
+    alignment_model VARCHAR(128) NOT NULL,
     require_script_review BOOLEAN NOT NULL DEFAULT TRUE,
     status VARCHAR(32) NOT NULL DEFAULT 'draft',
     active_workflow_id UUID,
@@ -29,8 +29,8 @@ CREATE TABLE projects (
     CHECK (image_model <> ''),
     CHECK (speech_provider <> ''),
     CHECK (speech_model <> ''),
-    CHECK (transcription_provider <> ''),
-    CHECK (transcription_model <> ''),
+    CHECK (alignment_provider <> ''),
+    CHECK (alignment_model <> ''),
     CHECK (status IN ('draft', 'queued', 'generating_script', 'waiting_script_review', 'generating_storyboard', 'generating_assets', 'building_timeline', 'rendering', 'completed', 'failed'))
 );
 CREATE INDEX idx_projects_status_updated_at ON projects (status, updated_at DESC);

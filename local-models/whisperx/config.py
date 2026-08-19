@@ -1,4 +1,4 @@
-"""faster-whisper 执行服务的独立 TOML 配置。"""
+"""WhisperX 强制对齐服务的独立 TOML 配置。"""
 
 from __future__ import annotations
 
@@ -28,10 +28,10 @@ class ServerConfig(StrictModel):
 
 
 class ModelConfig(StrictModel):
+    # 该模型是 WhisperX 官方中文默认对齐模型，模型卡使用 Apache-2.0 许可证。
     name: str = Field(min_length=1)
     download_root: str = "./models"
     device: str = "cpu"
-    compute_type: str = "int8"
     language: str = "zh"
     cpu_threads: int = Field(default=0, ge=0)
     num_workers: int = Field(default=1, ge=1)
@@ -43,7 +43,7 @@ class AppConfig(StrictModel):
 
 
 def default_config_path() -> Path:
-    configured = os.getenv("TKTKGO_FASTER_WHISPER_CONFIG", "").strip()
+    configured = os.getenv("TKTKGO_WHISPERX_CONFIG", "").strip()
     if configured:
         return Path(configured).expanduser().resolve()
     return Path(__file__).resolve().parent / "provider.toml"
@@ -52,14 +52,14 @@ def default_config_path() -> Path:
 def load_config(path: Path | None = None) -> tuple[AppConfig, Path]:
     config_path = (path or default_config_path()).resolve()
     if not config_path.is_file():
-        raise RuntimeError(f"faster-whisper 配置文件不存在: {config_path}")
+        raise RuntimeError(f"WhisperX 配置文件不存在: {config_path}")
     try:
         with config_path.open("rb") as file:
             return AppConfig.model_validate(tomllib.load(file)), config_path
     except tomllib.TOMLDecodeError as error:
-        raise RuntimeError(f"faster-whisper TOML 语法错误: {error}") from error
+        raise RuntimeError(f"WhisperX TOML 语法错误: {error}") from error
     except ValidationError as error:
-        raise RuntimeError(f"faster-whisper 配置校验失败:\n{error}") from error
+        raise RuntimeError(f"WhisperX 配置校验失败:\n{error}") from error
 
 
 def resolve_config_path(config_path: Path, value: str) -> Path:

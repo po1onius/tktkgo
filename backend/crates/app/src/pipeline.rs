@@ -10,8 +10,8 @@ use crate::{
     AppError, AppResult,
     db::{AssetRecord, NewAsset, NewGenerationTask, NewRender, Repository, SceneRecord},
     domain::{
-        CaptionCue, Project, ProjectVersion, RenderJobRequest, RenderScene, RenderSpec, ScriptSpec,
-        StoryboardSpec, TransitionKind,
+        CaptionBlock, CaptionCue, Project, ProjectVersion, RenderJobRequest, RenderScene,
+        RenderSpec, ScriptSpec, StoryboardSpec, TransitionKind,
     },
     media::probe_duration_ms,
     providers::{ImageGenerationRequest, ModelGatewayClient, ProviderOutput, ProviderUsage},
@@ -23,8 +23,11 @@ const SCRIPT_PROMPT_VERSION: &str = "script-v1";
 const STORYBOARD_PROMPT_VERSION: &str = "storyboard-v1";
 const IMAGE_PROMPT_VERSION: &str = "image-v1";
 const SPEECH_PROMPT_VERSION: &str = "speech-v1";
-const TRANSCRIPTION_PROMPT_VERSION: &str = "transcription-v1";
-const RENDER_PIPELINE_VERSION: &str = "render-v1";
+const ALIGNMENT_PIPELINE_VERSION: &str = "alignment-v2";
+const RENDER_PIPELINE_VERSION: &str = "render-v2";
+const CAPTION_MAX_CHARACTERS: usize = 24;
+const CAPTION_SOFT_BREAK_CHARACTERS: usize = 14;
+const CAPTION_PAUSE_BREAK_MS: i64 = 600;
 const SCENE_CONCURRENCY: usize = 3;
 
 #[derive(Clone)]
@@ -516,15 +519,15 @@ impl PipelineService {
         speech: &GeneratedSpeech,
     ) -> AppResult<GeneratedCaptions> {
         let key = stable_task_key(
-            "transcription",
+            "alignment",
             &format!(
                 "{}:{}:scene:{}:captions:{}:{}:{}:{}:{}",
                 project.id,
                 version.version,
                 scene.id,
-                project.transcription_provider,
-                project.transcription_model,
-                TRANSCRIPTION_PROMPT_VERSION,
+                project.alignment_provider,
+                project.alignment_model,
+                ALIGNMENT_PIPELINE_VERSION,
                 speech.asset.object.checksum,
                 content_hash(scene.narration_text.as_bytes()),
             ),
@@ -538,10 +541,10 @@ impl PipelineService {
                 project_id: project.id,
                 version_id: Some(version.id),
                 scene_id: Some(scene.id),
-                stage: "transcription",
+                stage: "alignment",
                 key: &key,
-                provider: &project.transcription_provider,
-                model: &project.transcription_model,
+                provider: &project.alignment_provider,
+                model: &project.alignment_model,
             })
             .await?;
         let result: AppResult<(GeneratedCaptions, ProviderUsage)> = async {
@@ -551,12 +554,12 @@ impl PipelineService {
                 .align_speech(
                     audio,
                     &scene.narration_text,
-                    &project.transcription_provider,
-                    &project.transcription_model,
+                    &project.alignment_provider,
+                    &project.alignment_model,
                     task_id,
                 )
                 .await?;
-            validate_captions(&output.value, speech.duration_ms)?;
+            validate_captions(&output.value, speech.duration_ms, &scene.narration_text)?;
             let caption_bytes = serde_json::to_vec_pretty(&output.value)?;
             let base_key = format!("projects/{}/scenes/{}", project.id, scene.id);
             let object = self
@@ -573,10 +576,14 @@ impl PipelineService {
                     scene.id,
                     AssetDescriptor {
                         kind: "captions",
-                        provider: &project.transcription_provider,
-                        model: &project.transcription_model,
+                        provider: &project.alignment_provider,
+                        model: &project.alignment_model,
                         object: &object,
-                        metadata: json!({"cue_count": output.value.len()}),
+                        metadata: json!({
+                            "alignment_mode": "canonical_text",
+                            "cue_count": output.value.len(),
+                            "text_hash": content_hash(scene.narration_text.as_bytes()),
+                        }),
                     },
                 )
                 .await?;
@@ -649,6 +656,15 @@ impl PipelineService {
             .map(|scene| {
                 let duration_in_frames =
                     ((scene.duration_ms + 250) * fps as i64 / 1000).max(fps as i64);
+                let caption_blocks = build_caption_blocks(&scene.captions);
+                info!(
+                    project_id = %project.id,
+                    scene_id = %scene.scene_id,
+                    sequence = scene.sequence,
+                    aligned_cue_count = scene.captions.len(),
+                    caption_block_count = caption_blocks.len(),
+                    "字符级对齐结果已聚合为固定字幕块"
+                );
                 let output = RenderScene {
                     id: scene.scene_id,
                     sequence: scene.sequence,
@@ -658,7 +674,7 @@ impl PipelineService {
                     audio_url: scene.audio_url,
                     on_screen_text: scene.on_screen_text,
                     transition: scene.transition,
-                    captions: scene.captions,
+                    caption_blocks,
                 };
                 cursor += duration_in_frames;
                 output
@@ -981,7 +997,10 @@ fn compact_text(value: &str) -> String {
         .collect()
 }
 
-fn validate_captions(cues: &[CaptionCue], duration_ms: i64) -> AppResult<()> {
+fn validate_captions(cues: &[CaptionCue], duration_ms: i64, canonical_text: &str) -> AppResult<()> {
+    if cues.is_empty() {
+        return Err(AppError::Validation("字幕强制对齐结果不能为空".into()));
+    }
     let mut previous_end = 0;
     for (index, cue) in cues.iter().enumerate() {
         if cue.text.trim().is_empty()
@@ -999,7 +1018,90 @@ fn validate_captions(cues: &[CaptionCue], duration_ms: i64) -> AppResult<()> {
         }
         previous_end = cue.end_ms;
     }
+    let aligned_text = cues.iter().map(|cue| cue.text.as_str()).collect::<String>();
+    if compact_text(&aligned_text) != compact_text(canonical_text) {
+        return Err(AppError::Validation(
+            "字幕强制对齐结果与确定口播原文不一致".into(),
+        ));
+    }
     Ok(())
+}
+
+fn build_caption_blocks(cues: &[CaptionCue]) -> Vec<CaptionBlock> {
+    let mut blocks = Vec::new();
+    let mut text = String::new();
+    let mut start_ms = 0;
+    let mut end_ms = 0;
+    let mut character_count = 0;
+
+    let flush = |blocks: &mut Vec<CaptionBlock>,
+                 text: &mut String,
+                 start_ms: &mut i64,
+                 end_ms: &mut i64,
+                 character_count: &mut usize| {
+        let normalized = text.trim().to_owned();
+        if !normalized.is_empty() {
+            blocks.push(CaptionBlock {
+                text: normalized,
+                start_ms: *start_ms,
+                end_ms: *end_ms,
+            });
+        }
+        text.clear();
+        *start_ms = 0;
+        *end_ms = 0;
+        *character_count = 0;
+    };
+
+    for cue in cues {
+        // 明显停顿代表语义边界，即使上游文稿缺少标点也不要把两段话挤在同一屏。
+        if !text.is_empty() && cue.start_ms - end_ms >= CAPTION_PAUSE_BREAK_MS {
+            flush(
+                &mut blocks,
+                &mut text,
+                &mut start_ms,
+                &mut end_ms,
+                &mut character_count,
+            );
+        }
+        if text.is_empty() {
+            start_ms = cue.start_ms;
+        }
+        text.push_str(&cue.text);
+        end_ms = cue.end_ms;
+        character_count += cue
+            .text
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .count();
+
+        let hard_break = cue
+            .text
+            .chars()
+            .any(|character| matches!(character, '。' | '！' | '？' | '；' | '!' | '?' | ';'));
+        let soft_break = character_count >= CAPTION_SOFT_BREAK_CHARACTERS
+            && cue
+                .text
+                .chars()
+                .any(|character| matches!(character, '，' | '、' | '：' | ',' | ':'));
+        if hard_break || soft_break || character_count >= CAPTION_MAX_CHARACTERS {
+            flush(
+                &mut blocks,
+                &mut text,
+                &mut start_ms,
+                &mut end_ms,
+                &mut character_count,
+            );
+        }
+    }
+    flush(
+        &mut blocks,
+        &mut text,
+        &mut start_ms,
+        &mut end_ms,
+        &mut character_count,
+    );
+    blocks
 }
 
 fn render_dimensions(aspect_ratio: &str) -> (i32, i32) {

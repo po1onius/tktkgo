@@ -41,8 +41,8 @@ pub struct CreateProjectRequest {
     pub voice: String,
     pub speech_provider: String,
     pub speech_model: String,
-    pub transcription_provider: String,
-    pub transcription_model: String,
+    pub alignment_provider: String,
+    pub alignment_model: String,
     #[serde(default = "default_review")]
     pub require_script_review: bool,
     #[serde(default = "default_auto_start")]
@@ -71,7 +71,7 @@ impl CreateProjectRequest {
             ("文案 Provider", self.text_provider.as_str()),
             ("图片 Provider", self.image_provider.as_str()),
             ("口播 Provider", self.speech_provider.as_str()),
-            ("字幕 Provider", self.transcription_provider.as_str()),
+            ("字幕对齐 Provider", self.alignment_provider.as_str()),
         ] {
             if provider.trim().is_empty() || provider.chars().count() > 64 {
                 return Err(AppError::Validation(format!(
@@ -83,7 +83,7 @@ impl CreateProjectRequest {
             ("文案模型", self.text_model.as_str()),
             ("图片模型", self.image_model.as_str()),
             ("口播模型", self.speech_model.as_str()),
-            ("字幕模型", self.transcription_model.as_str()),
+            ("字幕对齐模型", self.alignment_model.as_str()),
         ] {
             if model.trim().is_empty() || model.chars().count() > 128 {
                 return Err(AppError::Validation(format!(
@@ -128,8 +128,8 @@ pub struct Project {
     pub voice: String,
     pub speech_provider: String,
     pub speech_model: String,
-    pub transcription_provider: String,
-    pub transcription_model: String,
+    pub alignment_provider: String,
+    pub alignment_model: String,
     pub require_script_review: bool,
     pub status: String,
     pub active_workflow_id: Option<Uuid>,
@@ -155,8 +155,8 @@ pub struct NewProject<'a> {
     pub voice: &'a str,
     pub speech_provider: &'a str,
     pub speech_model: &'a str,
-    pub transcription_provider: &'a str,
-    pub transcription_model: &'a str,
+    pub alignment_provider: &'a str,
+    pub alignment_model: &'a str,
     pub require_script_review: bool,
 }
 
@@ -248,6 +248,15 @@ pub struct CaptionCue {
     pub end_ms: i64,
 }
 
+/// 进入渲染协议的固定字幕块。字符级时间戳只用于构建该结构，Remotion 在整个
+/// 区间内展示完整文本，不再根据当前字符移动字幕窗口。
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct CaptionBlock {
+    pub text: String,
+    pub start_ms: i64,
+    pub end_ms: i64,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct RenderSpec {
     pub project_id: Uuid,
@@ -269,7 +278,7 @@ pub struct RenderScene {
     pub audio_url: String,
     pub on_screen_text: Option<String>,
     pub transition: TransitionKind,
-    pub captions: Vec<CaptionCue>,
+    pub caption_blocks: Vec<CaptionBlock>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

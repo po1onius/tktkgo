@@ -10,7 +10,7 @@ import {
   useVideoConfig,
 } from "remotion";
 import { RENDER_FONT_FAMILY, useRenderFonts } from "./fonts";
-import type { CaptionCue, RenderScene, RenderSpec } from "./types";
+import type { CaptionBlock, RenderScene, RenderSpec } from "./types";
 
 export const GeneratedVideo: React.FC<{ spec: RenderSpec }> = ({ spec }) => {
   // Fontsource 的中文字体按 Unicode Range 分包；把本次视频所有会展示的文字交给
@@ -18,7 +18,7 @@ export const GeneratedVideo: React.FC<{ spec: RenderSpec }> = ({ spec }) => {
   const renderText = spec.scenes
     .flatMap((scene) => [
       scene.on_screen_text ?? "",
-      ...scene.captions.map((cue) => cue.text),
+      ...scene.caption_blocks.map((block) => block.text),
     ])
     .join("");
   useRenderFonts(renderText);
@@ -126,24 +126,23 @@ const SceneView: React.FC<{ scene: RenderScene }> = ({ scene }) => {
           {scene.on_screen_text}
         </div>
       ) : null}
-      <CaptionLine cues={scene.captions} />
+      <CaptionLine blocks={scene.caption_blocks} />
       <Audio src={scene.audio_url} />
     </AbsoluteFill>
   );
 };
 
-const CaptionLine: React.FC<{ cues: CaptionCue[] }> = ({ cues }) => {
+const CaptionLine: React.FC<{ blocks: CaptionBlock[] }> = ({ blocks }) => {
   const frame = useCurrentFrame();
   const { fps, width } = useVideoConfig();
   const currentMs = (frame / fps) * 1000;
-  const activeIndex = cues.findIndex(
-    (cue) => currentMs >= cue.start_ms && currentMs < cue.end_ms,
+  const activeBlock = blocks.find(
+    (block) => currentMs >= block.start_ms && currentMs < block.end_ms,
   );
-  if (activeIndex < 0) return null;
+  if (!activeBlock) return null;
 
-  // 以当前词为中心展示一个短窗口，避免中文单词时间戳造成字幕逐字跳动。
-  const start = Math.max(0, activeIndex - 3);
-  const end = Math.min(cues.length, activeIndex + 5);
+  // 一个时间区间始终渲染同一个完整字幕块。文字和布局都不随当前字符变化，
+  // 因此画面不会再出现横向滚动或前后文不断挤入的视觉抖动。
   return (
     <div
       style={{
@@ -159,17 +158,7 @@ const CaptionLine: React.FC<{ cues: CaptionCue[] }> = ({ cues }) => {
         textShadow: "0 3px 12px rgba(0,0,0,.95)",
       }}
     >
-      {cues.slice(start, end).map((cue, offset) => {
-        const index = start + offset;
-        return (
-          <span
-            key={`${cue.start_ms}-${index}`}
-            style={{ color: index === activeIndex ? "#FFD166" : "white" }}
-          >
-            {cue.text}
-          </span>
-        );
-      })}
+      {activeBlock.text}
     </div>
   );
 };

@@ -1,0 +1,29 @@
+[project]
+name = "tktkgo-whisperx-provider"
+version = "0.1.0"
+description = "tktkgo 本地中文强制对齐 Provider"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "fastapi==0.141.1",
+  "python-multipart==0.0.32",
+  "torch==2.8.0",
+  "torchaudio==2.8.0",
+  "torchvision==0.23.0",
+  "uvicorn[standard]==0.52.3",
+  "whisperx==3.8.6",
+]
+
+[tool.uv]
+package = false
+
+# 本地默认使用 CPU；GPU 部署按 WhisperX 官方要求手动改为对应 CUDA 索引，避免
+# CPU 环境被无意安装数 GB 的 CUDA 运行时。
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+torchaudio = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true

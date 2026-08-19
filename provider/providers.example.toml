@@ -18,7 +18,7 @@ api_key = ""
 base_url = "https://pic2api.com/v1"
 
 # 本地 Provider 在网关中只有 HTTP 地址；模型安装和进程生命周期属于 local-models。
-[providers.faster_whisper]
+[providers.whisperx]
 base_url = "http://127.0.0.1:8102"
 
 [providers.cosy_voice]
@@ -37,6 +37,5 @@ pic2api = []
 openai = ["gpt-4o-mini-tts"]
 cosy_voice = []
 
-[models.transcription]
-openai = ["whisper-1"]
-faster_whisper = []
+[models.alignment]
+whisperx = ["jonatasgrosman/wav2vec2-large-xlsr-53-chinese-zh-cn"]

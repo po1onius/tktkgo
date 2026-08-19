@@ -16,14 +16,14 @@ from pydantic import (
     model_validator,
 )
 
-Capability = Literal["text", "image", "speech", "transcription"]
+Capability = Literal["text", "image", "speech", "alignment"]
 
 # 每种供应商只允许出现在确实实现的能力中，避免配置成功但运行时请求到不存在的端点。
 SUPPORTED_PROVIDERS: dict[Capability, set[str]] = {
     "text": {"openai", "deepseek"},
     "image": {"openai", "pic2api"},
     "speech": {"openai", "cosy_voice"},
-    "transcription": {"openai", "faster_whisper"},
+    "alignment": {"whisperx"},
 }
 REMOTE_PROVIDERS = {"openai", "deepseek", "pic2api"}
 
@@ -82,7 +82,7 @@ class ProvidersConfig(StrictModel):
     openai: RemoteProviderConfig
     deepseek: RemoteProviderConfig
     pic2api: RemoteProviderConfig
-    faster_whisper: LocalProviderConfig
+    whisperx: LocalProviderConfig
     cosy_voice: LocalProviderConfig
 
 
@@ -90,7 +90,7 @@ class ModelsConfig(StrictModel):
     text: dict[str, list[str]]
     image: dict[str, list[str]]
     speech: dict[str, list[str]]
-    transcription: dict[str, list[str]]
+    alignment: dict[str, list[str]]
 
     def for_capability(self, capability: Capability) -> dict[str, list[str]]:
         return getattr(self, capability)
@@ -132,7 +132,7 @@ class AppConfig(StrictModel):
         # 每个本地执行服务进程只装载一个模型。网关与部署已经解耦，但同一个
         # base_url 仍不能同时声明多个执行模型，否则目录中会永久出现不可用项。
         local_capabilities: dict[str, Capability] = {
-            "faster_whisper": "transcription",
+            "whisperx": "alignment",
             "cosy_voice": "speech",
         }
         for provider, capability in local_capabilities.items():
