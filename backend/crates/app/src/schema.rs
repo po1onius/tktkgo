@@ -34,6 +34,29 @@ diesel::table! {
         script_spec -> Nullable<Jsonb>,
         storyboard_spec -> Nullable<Jsonb>,
         render_spec -> Nullable<Jsonb>,
+        script_review_status -> Varchar,
+        script_review_feedback -> Nullable<Text>,
+        script_reviewed_at -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
+diesel::table! {
+    generation_jobs (id) {
+        id -> Uuid,
+        project_id -> Uuid,
+        project_version_id -> Nullable<Uuid>,
+        workflow_id -> Uuid,
+        status -> Varchar,
+        current_stage -> Varchar,
+        failed_stage -> Nullable<Varchar>,
+        recoverable -> Bool,
+        attempt -> Int4,
+        error_code -> Nullable<Varchar>,
+        error_message -> Nullable<Text>,
+        started_at -> Nullable<Timestamptz>,
+        completed_at -> Nullable<Timestamptz>,
         created_at -> Timestamptz,
         updated_at -> Timestamptz,
     }
@@ -123,6 +146,7 @@ diesel::table! {
 diesel::allow_tables_to_appear_in_same_query!(
     projects,
     project_versions,
+    generation_jobs,
     scenes,
     assets,
     generation_tasks,

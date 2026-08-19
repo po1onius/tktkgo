@@ -12,7 +12,10 @@ use serde::Serialize;
 use serde_json::json;
 use tktkgo_app::{
     AppError, Repository, Settings, create_pool,
-    domain::{CreateProjectRequest, Project, ScriptReviewInput, WorkflowInput},
+    domain::{
+        CreateProjectRequest, GenerationJob, GenerationJobSummary, Project, ScriptReviewInput,
+        WorkflowInput,
+    },
     providers::{ModelGatewayClient, ProviderCatalog, ProviderOption},
     run_migrations,
 };
@@ -51,6 +54,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/providers", get(list_providers))
+        .route("/v1/jobs", get(list_generation_jobs))
+        .route("/v1/jobs/{job_id}", get(get_generation_job))
+        .route("/v1/jobs/{job_id}/resume", post(resume_generation_job))
         .route("/v1/projects", post(create_project))
         .route("/v1/projects/{project_id}", get(get_project))
         .route("/v1/projects/{project_id}/scenes", get(list_scenes))
@@ -127,6 +133,19 @@ async fn list_providers(
 
 async fn fetch_provider_catalog(state: &ApiState) -> Result<ProviderCatalog, ApiError> {
     state.gateway.list_models().await.map_err(Into::into)
+}
+
+async fn list_generation_jobs(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<Vec<GenerationJobSummary>>, ApiError> {
+    Ok(Json(state.repository.list_generation_jobs().await?))
+}
+
+async fn get_generation_job(
+    State(state): State<Arc<ApiState>>,
+    Path(job_id): Path<Uuid>,
+) -> Result<Json<GenerationJob>, ApiError> {
+    Ok(Json(state.repository.get_generation_job(job_id).await?))
 }
 
 #[instrument(skip(state, request), fields(title = %request.title))]
@@ -246,11 +265,45 @@ async fn start_generation(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<Uuid>,
 ) -> Result<(StatusCode, Json<DispatchResponse>), ApiError> {
-    let workflow_id = dispatch_generation(&state, project_id).await?;
+    let dispatch = dispatch_generation(&state, project_id).await?;
     Ok((
         StatusCode::ACCEPTED,
         Json(DispatchResponse {
             project_id,
+            job_id: dispatch.job_id,
+            workflow_id: dispatch.workflow_id,
+        }),
+    ))
+}
+
+#[instrument(skip(state), fields(job_id = %job_id))]
+async fn resume_generation_job(
+    State(state): State<Arc<ApiState>>,
+    Path(job_id): Path<Uuid>,
+) -> Result<(StatusCode, Json<DispatchResponse>), ApiError> {
+    let existing = state.repository.get_generation_job(job_id).await?;
+    let project = state.repository.get_project(existing.project_id).await?;
+    ensure_project_providers_available(&state, &project).await?;
+    let workflow_id = Uuid::new_v4();
+    let resumed = state
+        .repository
+        .queue_generation_job_resume(job_id, workflow_id)
+        .await?;
+    let version_id = resumed.project_version_id;
+    submit_workflow(
+        &state,
+        resumed.project_id,
+        resumed.id,
+        workflow_id,
+        version_id,
+    )
+    .await?;
+    info!(job_id = %job_id, project_id = %resumed.project_id, workflow_id = %workflow_id, version_id = ?version_id, attempt = resumed.attempt, "失败任务继续请求已提交");
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(DispatchResponse {
+            project_id: resumed.project_id,
+            job_id,
             workflow_id,
         }),
     ))
@@ -296,8 +349,31 @@ async fn review_script(
 }
 
 #[instrument(skip(state), fields(project_id = %project_id))]
-async fn dispatch_generation(state: &ApiState, project_id: Uuid) -> Result<Uuid, ApiError> {
+async fn dispatch_generation(
+    state: &ApiState,
+    project_id: Uuid,
+) -> Result<DispatchResponse, ApiError> {
     let project = state.repository.get_project(project_id).await?;
+    ensure_project_providers_available(state, &project).await?;
+    let job_id = Uuid::new_v4();
+    let workflow_id = Uuid::new_v4();
+    state
+        .repository
+        .queue_new_generation_job(project_id, job_id, workflow_id)
+        .await?;
+    submit_workflow(state, project_id, job_id, workflow_id, None).await?;
+    info!(project_id = %project_id, job_id = %job_id, workflow_id = %workflow_id, "视频生成工作流已提交");
+    Ok(DispatchResponse {
+        project_id,
+        job_id,
+        workflow_id,
+    })
+}
+
+async fn ensure_project_providers_available(
+    state: &ApiState,
+    project: &Project,
+) -> Result<(), ApiError> {
     let catalog = fetch_provider_catalog(state).await?;
     ensure_catalog_choice(
         "文案",
@@ -323,12 +399,16 @@ async fn dispatch_generation(state: &ApiState, project_id: Uuid) -> Result<Uuid,
         &project.transcription_provider,
         &project.transcription_model,
     )?;
-    // Repository 使用条件 UPDATE 原子校验项目状态，避免并发请求同时通过检查。
-    let workflow_id = Uuid::new_v4();
-    state
-        .repository
-        .queue_project(project_id, workflow_id)
-        .await?;
+    Ok(())
+}
+
+async fn submit_workflow(
+    state: &ApiState,
+    project_id: Uuid,
+    job_id: Uuid,
+    workflow_id: Uuid,
+    resume_version_id: Option<Uuid>,
+) -> Result<(), ApiError> {
     let url = format!(
         "{}/VideoGenerationWorkflow/{}/run/send",
         state.settings.restate_ingress_url, workflow_id
@@ -338,7 +418,11 @@ async fn dispatch_generation(state: &ApiState, project_id: Uuid) -> Result<Uuid,
     let response = state
         .http
         .post(url)
-        .json(&WorkflowInput { project_id })
+        .json(&WorkflowInput {
+            project_id,
+            job_id,
+            resume_version_id,
+        })
         .send()
         .await;
     let response = match response {
@@ -346,7 +430,18 @@ async fn dispatch_generation(state: &ApiState, project_id: Uuid) -> Result<Uuid,
         Err(error) => {
             state
                 .repository
-                .finalize_project(project_id, workflow_id, "failed", Some("无法连接 Restate"))
+                .update_generation_status(
+                    project_id,
+                    job_id,
+                    workflow_id,
+                    "failed",
+                    "failed",
+                    "dispatch",
+                    Some("restate_unreachable"),
+                    Some("无法连接 Restate"),
+                    true,
+                    true,
+                )
                 .await?;
             return Err(AppError::external("restate", error.to_string()).into());
         }
@@ -356,22 +451,28 @@ async fn dispatch_generation(state: &ApiState, project_id: Uuid) -> Result<Uuid,
         let body = response.text().await.unwrap_or_default();
         state
             .repository
-            .finalize_project(
+            .update_generation_status(
                 project_id,
+                job_id,
                 workflow_id,
                 "failed",
+                "failed",
+                "dispatch",
+                Some("restate_rejected"),
                 Some("无法提交到 Restate"),
+                true,
+                true,
             )
             .await?;
         return Err(AppError::external("restate", format!("HTTP {status}: {body}")).into());
     }
-    info!(project_id = %project_id, workflow_id = %workflow_id, "视频生成工作流已提交");
-    Ok(workflow_id)
+    Ok(())
 }
 
 #[derive(Serialize)]
 struct DispatchResponse {
     project_id: Uuid,
+    job_id: Uuid,
     workflow_id: Uuid,
 }
 

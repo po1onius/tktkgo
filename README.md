@@ -44,6 +44,15 @@ Rust Pipeline 只依赖一个 `ModelGatewayClient` 和四个固定 HTTP 能力�
 
 默认 `dev` 目标会使用 Podman Compose 启动 PostgreSQL 和 Restate，在宿主机安装依赖并构建 Rust、Web 和 Render 服务，随后启动应用服务并自动注册 Restate Workflow 端点。Web 使用 Next.js 静态导出，运行时由 Rust API 同源托管，不再启动独立的 Next.js 服务。API 和 Workflow 启动时会自动执行嵌入式数据库迁移，不需要安装 Diesel CLI。Provider 网关和两个本地模型均不属于应用进程生命周期。
 
+Web 首页包含完整生成任务列表。一次新生成会创建新的项目版本；失败任务的“从失败处继续”会保留原任务和原项目版本，创建新的 Restate 执行尝试，并按 `render_spec`、`storyboard_spec`、`script_spec` 检查点跳过已经完成的阶段。“重新生成新版本”仍用于明确需要从头生成的场景，不能与失败继续混用。
+
+任务相关 API：
+
+- `GET /v1/jobs`：按时间倒序列出最近任务及是否允许继续。
+- `GET /v1/jobs/{job_id}`：读取任务详情。
+- `POST /v1/jobs/{job_id}/resume`：继续当前失败版本。
+- `POST /v1/projects/{project_id}/generate`：创建新任务和新版本。
+
 API 和 Web 默认统一监听 `http://localhost:8000`，Restate 服务端点监听 `http://localhost:9080`，渲染服务监听 `http://localhost:8090`。Node.js/pnpm 仍用于构建 Web 和运行 Remotion，但 Web 本身不需要 Node.js 运行时服务。
 
 ### 使用本地口播和字幕模型

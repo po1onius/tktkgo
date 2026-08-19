@@ -17,8 +17,13 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppResult,
-    domain::{CreateProjectRequest, NewProject, Project, ProjectVersion, SceneDraft},
-    schema::{assets, generation_tasks, project_versions, projects, renders, scenes},
+    domain::{
+        CreateProjectRequest, GenerationJob, GenerationJobSummary, NewProject, Project,
+        ProjectVersion, SceneDraft,
+    },
+    schema::{
+        assets, generation_jobs, generation_tasks, project_versions, projects, renders, scenes,
+    },
 };
 
 pub type DbPool = Pool<AsyncPgConnection>;
@@ -125,94 +130,347 @@ impl Repository {
             .ok_or_else(|| AppError::NotFound(format!("项目 {project_id}")))
     }
 
-    pub async fn update_project_status(
+    pub async fn get_generation_job(&self, job_id: Uuid) -> AppResult<GenerationJob> {
+        let mut conn = self.connection().await?;
+        generation_jobs::table
+            .find(job_id)
+            .select(GenerationJob::as_select())
+            .first(&mut conn)
+            .await
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("生成任务 {job_id}")))
+    }
+
+    /// 返回面向前端的任务历史。任务是否允许继续由任务状态、项目当前状态和版本共同
+    /// 决定，避免用户继续一个已经被更新版本取代的旧失败任务。
+    pub async fn list_generation_jobs(&self) -> AppResult<Vec<GenerationJobSummary>> {
+        let jobs = {
+            let mut conn = self.connection().await?;
+            generation_jobs::table
+                .order(generation_jobs::created_at.desc())
+                .limit(100)
+                .select(GenerationJob::as_select())
+                .load::<GenerationJob>(&mut conn)
+                .await?
+        };
+        let mut summaries = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            let project = self.get_project(job.project_id).await?;
+            let version = match job.project_version_id {
+                Some(version_id) => Some(self.get_project_version(version_id).await?),
+                None => None,
+            };
+            let can_resume = job.status == "failed"
+                && job.recoverable
+                && project.status == "failed"
+                && project.active_workflow_id.is_none()
+                && version
+                    .as_ref()
+                    .is_none_or(|version| version.version == project.current_version);
+            summaries.push(GenerationJobSummary {
+                project_title: project.title,
+                project_version: version.as_ref().map(|version| version.version),
+                can_resume,
+                job,
+            });
+        }
+        Ok(summaries)
+    }
+
+    /// 原子创建顶层任务并占用项目的活动 Workflow。项目状态与任务行要么同时成功，
+    /// 要么同时回滚，防止出现项目已排队却没有可展示任务的中间状态。
+    pub async fn queue_new_generation_job(
         &self,
         project_id: Uuid,
+        job_id: Uuid,
         workflow_id: Uuid,
-        status: &str,
-        error_message: Option<&str>,
+    ) -> AppResult<GenerationJob> {
+        let mut conn = self.connection().await?;
+        let now = Utc::now();
+        let job = conn
+            .transaction::<GenerationJob, AppError, _>(async move |conn| {
+                let affected = diesel::update(
+                    projects::table
+                        .filter(projects::id.eq(project_id))
+                        .filter(projects::status.eq_any(["draft", "failed", "completed"])),
+                )
+                .set((
+                    projects::status.eq("queued"),
+                    projects::active_workflow_id.eq(Some(workflow_id)),
+                    projects::error_message.eq::<Option<String>>(None),
+                    projects::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .await?;
+                if affected == 0 {
+                    return Err(AppError::Conflict(format!(
+                        "项目 {project_id} 当前状态不允许启动新任务"
+                    )));
+                }
+                diesel::insert_into(generation_jobs::table)
+                    .values(NewGenerationJob {
+                        id: job_id,
+                        project_id,
+                        workflow_id,
+                        status: "queued",
+                        current_stage: "queued",
+                        attempt: 1,
+                        started_at: now,
+                    })
+                    .returning(GenerationJob::as_returning())
+                    .get_result(&mut *conn)
+                    .await
+                    .map_err(Into::into)
+            })
+            .await?;
+        info!(project_id = %project_id, job_id = %job_id, workflow_id = %workflow_id, "生成任务已创建并加入队列");
+        Ok(job)
+    }
+
+    /// 继续任务只允许复用项目当前失败版本。新的 Restate Workflow 仅代表一次新的执行
+    /// 尝试，不改变 generation_job 和 project_version 的业务身份。
+    pub async fn queue_generation_job_resume(
+        &self,
+        job_id: Uuid,
+        workflow_id: Uuid,
+    ) -> AppResult<GenerationJob> {
+        let job = self.get_generation_job(job_id).await?;
+        let version = match job.project_version_id {
+            Some(version_id) => Some(self.get_project_version(version_id).await?),
+            None => None,
+        };
+        let project = self.get_project(job.project_id).await?;
+        if job.status != "failed" || !job.recoverable {
+            return Err(AppError::Conflict(format!(
+                "生成任务 {job_id} 当前状态为 {}，不能继续",
+                job.status
+            )));
+        }
+        if project.status != "failed"
+            || project.active_workflow_id.is_some()
+            || version
+                .as_ref()
+                .is_some_and(|version| project.current_version != version.version)
+        {
+            return Err(AppError::Conflict(
+                "只能继续项目当前版本中没有活动 Workflow 的失败任务".into(),
+            ));
+        }
+
+        let mut conn = self.connection().await?;
+        let now = Utc::now();
+        let resumed = conn
+            .transaction::<GenerationJob, AppError, _>(async move |conn| {
+                let project_affected = diesel::update(
+                    projects::table
+                        .filter(projects::id.eq(project.id))
+                        .filter(projects::status.eq("failed"))
+                        .filter(projects::active_workflow_id.is_null()),
+                )
+                .set((
+                    projects::status.eq("queued"),
+                    projects::active_workflow_id.eq(Some(workflow_id)),
+                    projects::error_message.eq::<Option<String>>(None),
+                    projects::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .await?;
+                if project_affected == 0 {
+                    return Err(AppError::Conflict("项目已经被其他 Workflow 占用".into()));
+                }
+                let resumed = diesel::update(
+                    generation_jobs::table
+                        .find(job_id)
+                        .filter(generation_jobs::status.eq("failed"))
+                        .filter(generation_jobs::recoverable.eq(true)),
+                )
+                .set((
+                    generation_jobs::workflow_id.eq(workflow_id),
+                    generation_jobs::status.eq("queued"),
+                    generation_jobs::current_stage.eq("queued"),
+                    generation_jobs::failed_stage.eq::<Option<String>>(None),
+                    generation_jobs::recoverable.eq(false),
+                    generation_jobs::attempt.eq(generation_jobs::attempt + 1),
+                    generation_jobs::error_code.eq::<Option<String>>(None),
+                    generation_jobs::error_message.eq::<Option<String>>(None),
+                    generation_jobs::started_at.eq(Some(now)),
+                    generation_jobs::completed_at.eq::<Option<DateTime<Utc>>>(None),
+                    generation_jobs::updated_at.eq(now),
+                ))
+                .returning(GenerationJob::as_returning())
+                .get_result(&mut *conn)
+                .await?;
+                Ok(resumed)
+            })
+            .await?;
+        info!(job_id = %job_id, project_id = %job.project_id, workflow_id = %workflow_id, attempt = resumed.attempt, version = ?version.as_ref().map(|version| version.version), "失败任务已重新加入队列，将从最近检查点继续");
+        Ok(resumed)
+    }
+
+    pub async fn assign_generation_job_version(
+        &self,
+        job_id: Uuid,
+        workflow_id: Uuid,
+        version_id: Uuid,
     ) -> AppResult<()> {
         let mut conn = self.connection().await?;
-        // 每次状态变更都绑定活动工作流，防止已经终止的旧工作流覆盖新版本的状态。
         let affected = diesel::update(
-            projects::table
-                .filter(projects::id.eq(project_id))
-                .filter(projects::active_workflow_id.eq(Some(workflow_id))),
+            generation_jobs::table
+                .find(job_id)
+                .filter(generation_jobs::workflow_id.eq(workflow_id)),
         )
         .set((
-            projects::status.eq(status),
-            projects::error_message.eq(error_message),
-            projects::updated_at.eq(Utc::now()),
+            generation_jobs::project_version_id.eq(Some(version_id)),
+            generation_jobs::updated_at.eq(Utc::now()),
         ))
         .execute(&mut conn)
         .await?;
         if affected == 0 {
             return Err(AppError::Conflict(format!(
-                "工作流 {workflow_id} 已不是项目 {project_id} 的活动工作流"
+                "Workflow {workflow_id} 已不是任务 {job_id} 的当前执行"
             )));
         }
-        info!(project_id = %project_id, workflow_id = %workflow_id, status, "项目状态已更新");
+        info!(job_id = %job_id, workflow_id = %workflow_id, version_id = %version_id, "生成任务已绑定项目版本");
         Ok(())
     }
 
-    pub async fn queue_project(&self, project_id: Uuid, workflow_id: Uuid) -> AppResult<()> {
+    pub async fn get_project_version(&self, version_id: Uuid) -> AppResult<ProjectVersion> {
         let mut conn = self.connection().await?;
-        // 状态判断和排队必须在同一条 UPDATE 中完成，避免两个并发请求都成功启动工作流。
-        let affected = diesel::update(
-            projects::table
-                .filter(projects::id.eq(project_id))
-                .filter(projects::status.eq_any(["draft", "failed", "completed"])),
-        )
-        .set((
-            projects::status.eq("queued"),
-            projects::active_workflow_id.eq(Some(workflow_id)),
-            projects::error_message.eq::<Option<String>>(None),
-            projects::updated_at.eq(Utc::now()),
-        ))
-        .execute(&mut conn)
-        .await?;
+        project_versions::table
+            .find(version_id)
+            .select(ProjectVersion::as_select())
+            .first(&mut conn)
+            .await
+            .optional()?
+            .ok_or_else(|| AppError::NotFound(format!("项目版本 {version_id}")))
+    }
+
+    pub async fn mark_script_review(
+        &self,
+        version_id: Uuid,
+        approved: bool,
+        feedback: Option<&str>,
+    ) -> AppResult<()> {
+        let status = if approved { "approved" } else { "rejected" };
+        let mut conn = self.connection().await?;
+        let affected = diesel::update(project_versions::table.find(version_id))
+            .set((
+                project_versions::script_review_status.eq(status),
+                project_versions::script_review_feedback.eq(feedback),
+                project_versions::script_reviewed_at.eq(Some(Utc::now())),
+                project_versions::updated_at.eq(Utc::now()),
+            ))
+            .execute(&mut conn)
+            .await?;
         if affected == 0 {
-            let current = self.get_project(project_id).await?;
-            return Err(AppError::Conflict(format!(
-                "项目 {} 当前状态为 {}，不能重复启动",
-                project_id, current.status
-            )));
+            return Err(AppError::NotFound(format!("项目版本 {version_id}")));
         }
-        info!(project_id = %project_id, workflow_id = %workflow_id, "项目已加入生成队列");
+        info!(version_id = %version_id, status, "脚本审核结果已持久化");
         Ok(())
     }
 
-    /// 写入终态并清除活动工作流。终态项目允许后续显式发起新版本。
-    pub async fn finalize_project(
+    /// 同一事务更新项目当前快照和顶层任务状态。terminal=true 时同时释放项目的活动
+    /// Workflow，避免失败后无法继续，也防止旧 Workflow 覆盖后续执行。
+    #[allow(clippy::too_many_arguments)]
+    pub async fn update_generation_status(
         &self,
         project_id: Uuid,
+        job_id: Uuid,
         workflow_id: Uuid,
-        status: &str,
+        project_status: &str,
+        job_status: &str,
+        stage: &str,
+        error_code: Option<&str>,
         error_message: Option<&str>,
+        recoverable: bool,
+        terminal: bool,
     ) -> AppResult<()> {
-        if !matches!(status, "draft" | "failed" | "completed") {
-            return Err(AppError::Internal(format!("{status} 不是项目终态")));
-        }
         let mut conn = self.connection().await?;
-        let affected = diesel::update(
-            projects::table
-                .filter(projects::id.eq(project_id))
-                .filter(projects::active_workflow_id.eq(Some(workflow_id))),
-        )
-        .set((
-            projects::status.eq(status),
-            projects::error_message.eq(error_message),
-            projects::active_workflow_id.eq::<Option<Uuid>>(None),
-            projects::updated_at.eq(Utc::now()),
-        ))
-        .execute(&mut conn)
+        let now = Utc::now();
+        conn.transaction::<(), AppError, _>(async move |conn| {
+            let project_affected = if terminal {
+                diesel::update(
+                    projects::table
+                        .find(project_id)
+                        .filter(projects::active_workflow_id.eq(Some(workflow_id))),
+                )
+                .set((
+                    projects::status.eq(project_status),
+                    projects::error_message.eq(error_message),
+                    projects::active_workflow_id.eq::<Option<Uuid>>(None),
+                    projects::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .await?
+            } else {
+                diesel::update(
+                    projects::table
+                        .find(project_id)
+                        .filter(projects::active_workflow_id.eq(Some(workflow_id))),
+                )
+                .set((
+                    projects::status.eq(project_status),
+                    projects::error_message.eq(error_message),
+                    projects::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .await?
+            };
+            if project_affected == 0 {
+                return Err(AppError::Conflict(format!(
+                    "Workflow {workflow_id} 已不是项目 {project_id} 的活动 Workflow"
+                )));
+            }
+
+            let job_affected = if terminal {
+                diesel::update(
+                    generation_jobs::table
+                        .find(job_id)
+                        .filter(generation_jobs::workflow_id.eq(workflow_id)),
+                )
+                .set((
+                    generation_jobs::status.eq(job_status),
+                    generation_jobs::current_stage.eq(stage),
+                    generation_jobs::failed_stage.eq(if job_status == "failed" {
+                        Some(stage)
+                    } else {
+                        None
+                    }),
+                    generation_jobs::recoverable.eq(recoverable),
+                    generation_jobs::error_code.eq(error_code),
+                    generation_jobs::error_message.eq(error_message),
+                    generation_jobs::completed_at.eq(Some(now)),
+                    generation_jobs::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .await?
+            } else {
+                diesel::update(
+                    generation_jobs::table
+                        .find(job_id)
+                        .filter(generation_jobs::workflow_id.eq(workflow_id)),
+                )
+                .set((
+                    generation_jobs::status.eq(job_status),
+                    generation_jobs::current_stage.eq(stage),
+                    generation_jobs::failed_stage.eq::<Option<String>>(None),
+                    generation_jobs::recoverable.eq(false),
+                    generation_jobs::error_code.eq::<Option<String>>(None),
+                    generation_jobs::error_message.eq::<Option<String>>(None),
+                    generation_jobs::updated_at.eq(now),
+                ))
+                .execute(&mut *conn)
+                .await?
+            };
+            if job_affected == 0 {
+                return Err(AppError::Conflict(format!(
+                    "Workflow {workflow_id} 已不是任务 {job_id} 的当前执行"
+                )));
+            }
+            Ok(())
+        })
         .await?;
-        if affected == 0 {
-            return Err(AppError::Conflict(format!(
-                "工作流 {workflow_id} 已不是项目 {project_id} 的活动工作流"
-            )));
-        }
-        info!(project_id = %project_id, workflow_id = %workflow_id, status, "项目终态已更新，活动工作流已清除");
+        info!(project_id = %project_id, job_id = %job_id, workflow_id = %workflow_id, project_status, job_status, stage, terminal, "项目与生成任务状态已同步更新");
         Ok(())
     }
 
@@ -410,6 +668,8 @@ impl Repository {
             .on_conflict(generation_tasks::idempotency_key)
             .do_update()
             .set((
+                generation_tasks::workflow_id
+                    .eq(diesel::upsert::excluded(generation_tasks::workflow_id)),
                 generation_tasks::status.eq("running"),
                 generation_tasks::attempt.eq(generation_tasks::attempt + 1),
                 generation_tasks::started_at.eq(Some(Utc::now())),
@@ -631,6 +891,18 @@ pub struct SceneRecord {
     pub caption_asset_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Insertable)]
+#[diesel(table_name = generation_jobs)]
+struct NewGenerationJob<'a> {
+    id: Uuid,
+    project_id: Uuid,
+    workflow_id: Uuid,
+    status: &'a str,
+    current_stage: &'a str,
+    attempt: i32,
+    started_at: DateTime<Utc>,
 }
 
 #[derive(Insertable)]

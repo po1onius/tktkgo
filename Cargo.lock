@@ -2869,6 +2869,8 @@ name = "tktkgo-workflow"
 version = "0.1.0"
 dependencies = [
  "restate-sdk",
+ "serde",
+ "serde_json",
  "tktkgo-app",
  "tokio",
  "tracing",

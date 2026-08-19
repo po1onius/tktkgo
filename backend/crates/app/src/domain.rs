@@ -170,8 +170,43 @@ pub struct ProjectVersion {
     pub script_spec: Option<serde_json::Value>,
     pub storyboard_spec: Option<serde_json::Value>,
     pub render_spec: Option<serde_json::Value>,
+    pub script_review_status: String,
+    pub script_review_feedback: Option<String>,
+    pub script_reviewed_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// 面向用户展示的一次完整生成任务。Restate Workflow 可以因人工“继续”而更换，
+/// 但任务 ID 和项目版本保持不变，从而保留稳定的任务历史与恢复语义。
+#[derive(Clone, Debug, Queryable, Selectable, Serialize, Deserialize)]
+#[diesel(table_name = schema::generation_jobs)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+pub struct GenerationJob {
+    pub id: Uuid,
+    pub project_id: Uuid,
+    pub project_version_id: Option<Uuid>,
+    pub workflow_id: Uuid,
+    pub status: String,
+    pub current_stage: String,
+    pub failed_stage: Option<String>,
+    pub recoverable: bool,
+    pub attempt: i32,
+    pub error_code: Option<String>,
+    pub error_message: Option<String>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GenerationJobSummary {
+    #[serde(flatten)]
+    pub job: GenerationJob,
+    pub project_title: String,
+    pub project_version: Option<i32>,
+    pub can_resume: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
@@ -275,6 +310,10 @@ pub struct RenderScene {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorkflowInput {
     pub project_id: Uuid,
+    pub job_id: Uuid,
+    /// 为空表示创建新版本；有值表示继续该既有版本，绝不能隐式递增版本号。
+    #[serde(default)]
+    pub resume_version_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

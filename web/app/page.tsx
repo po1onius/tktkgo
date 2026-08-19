@@ -38,6 +38,27 @@ type RenderRecord = {
   duration_ms: number | null;
 };
 
+type GenerationJob = {
+  id: string;
+  project_id: string;
+  project_version_id: string | null;
+  workflow_id: string;
+  status: string;
+  current_stage: string;
+  failed_stage: string | null;
+  recoverable: boolean;
+  attempt: number;
+  error_code: string | null;
+  error_message: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  created_at: string;
+  updated_at: string;
+  project_title: string;
+  project_version: number | null;
+  can_resume: boolean;
+};
+
 type ProviderOption = {
   id: string;
   label: string;
@@ -80,13 +101,32 @@ const statusLabel: Record<string, string> = {
   rendering: "正在渲染视频",
   completed: "已完成",
   failed: "失败",
+  rejected: "审核退回",
+};
+const stageLabel: Record<string, string> = {
+  queued: "等待执行",
+  dispatch: "提交工作流",
+  script: "生成文稿",
+  generating_script: "生成文稿",
+  script_review: "审核文稿",
+  waiting_script_review: "等待文稿审核",
+  storyboard: "生成分镜",
+  generating_storyboard: "生成分镜",
+  assets: "生成场景素材",
+  generating_assets: "生成场景素材",
+  building_timeline: "构建时间轴",
+  render: "渲染视频",
+  rendering: "渲染视频",
+  completed: "生成完成",
 };
 const regeneratableStatuses = new Set(["draft", "failed", "completed"]);
+const terminalJobStatuses = new Set(["completed", "failed", "rejected"]);
 
 export default function Home() {
   const [project, setProject] = useState<Project | null>(null);
   const [version, setVersion] = useState<ProjectVersion | null>(null);
   const [render, setRender] = useState<RenderRecord | null>(null);
+  const [jobs, setJobs] = useState<GenerationJob[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderCatalog>(emptyProviders);
@@ -97,6 +137,7 @@ export default function Home() {
   const [voice, setVoice] = useState("");
 
   useEffect(() => {
+    void loadJobs();
     void request<ProviderCatalog>("/v1/providers")
       .then((catalog) => {
         setProviders(catalog);
@@ -111,6 +152,12 @@ export default function Home() {
         setError(`模型网关不可用：${messageOf(cause)}`);
       });
   }, []);
+
+  useEffect(() => {
+    if (!jobs.some((job) => !terminalJobStatuses.has(job.status))) return;
+    const timer = window.setInterval(() => void loadJobs(), 2500);
+    return () => window.clearInterval(timer);
+  }, [jobs]);
 
   const selectedSpeech =
     providers.speech.find(
@@ -162,12 +209,17 @@ export default function Home() {
             `/v1/projects/${projectId}/version`,
           ),
         );
-      if (next.status === "completed")
+      else setVersion(null);
+      if (next.status === "completed") {
         setRender(
           await request<RenderRecord | null>(
             `/v1/projects/${projectId}/renders/latest`,
           ),
         );
+      } else {
+        setRender(null);
+      }
+      await loadJobs();
       console.info("project refreshed", {
         projectId,
         status: next.status,
@@ -176,6 +228,51 @@ export default function Home() {
     } catch (cause) {
       console.error("refresh project failed", { projectId, cause });
       setError(messageOf(cause));
+    }
+  }
+
+  async function loadJobs() {
+    try {
+      const next = await request<GenerationJob[]>("/v1/jobs");
+      setJobs(next);
+      console.info("generation jobs loaded", { count: next.length });
+    } catch (cause) {
+      console.error("load generation jobs failed", { cause });
+      setError(`任务列表加载失败：${messageOf(cause)}`);
+    }
+  }
+
+  async function openJob(job: GenerationJob) {
+    setBusy(true);
+    setError(null);
+    try {
+      await refresh(job.project_id);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resume(job: GenerationJob) {
+    setBusy(true);
+    setError(null);
+    try {
+      await request(`/v1/jobs/${job.id}/resume`, { method: "POST" });
+      console.info("generation job resumed", {
+        jobId: job.id,
+        projectId: job.project_id,
+        attempt: job.attempt + 1,
+      });
+      await refresh(job.project_id);
+    } catch (cause) {
+      console.error("resume generation job failed", {
+        jobId: job.id,
+        cause,
+      });
+      setError(messageOf(cause));
+      await loadJobs();
+      if (project?.id === job.project_id) await refresh(job.project_id);
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -192,7 +289,9 @@ export default function Home() {
         !selectedSpeech ||
         !selectedTranscription
       ) {
-        throw new Error("模型目录尚未就绪，请先启动 make provider");
+        throw new Error(
+          "模型目录尚未就绪，请在 provider 目录执行 uv run --frozen python provider.py",
+        );
       }
       const created = await request<Project>("/v1/projects", {
         method: "POST",
@@ -217,6 +316,7 @@ export default function Home() {
       });
       console.info("project created", { projectId: created.id });
       setProject(created);
+      await loadJobs();
     } catch (cause) {
       console.error("create project failed", { cause });
       setError(messageOf(cause));
@@ -272,6 +372,14 @@ export default function Home() {
     }
   }
 
+  const currentJob = project
+    ? jobs.find(
+        (job) =>
+          job.project_id === project.id &&
+          job.project_version === project.current_version,
+      )
+    : undefined;
+
   return (
     <main>
       <header>
@@ -281,6 +389,63 @@ export default function Home() {
           文稿、分镜、插图、口播与字幕由工作流逐步生成，每一步都可以追踪和重放。
         </p>
       </header>
+
+      <section className="panel jobs-panel">
+        <div className="jobs-head">
+          <div>
+            <div className="eyebrow">GENERATION JOBS</div>
+            <h2>任务列表</h2>
+          </div>
+          <button className="secondary compact" onClick={() => void loadJobs()}>
+            刷新
+          </button>
+        </div>
+        {jobs.length ? (
+          <div className="jobs-list">
+            {jobs.map((job) => (
+              <article className="job-row" key={job.id}>
+                <div className="job-main">
+                  <div className="job-title-line">
+                    <span className={`status ${job.status}`}>
+                      {statusLabel[job.status] ?? job.status}
+                    </span>
+                    <strong>{job.project_title}</strong>
+                    <span className="job-version">
+                      {job.project_version ? `版本 ${job.project_version}` : "准备版本"}
+                    </span>
+                  </div>
+                  <div className="job-meta">
+                    <span>
+                      阶段 {stageLabel[job.failed_stage ?? job.current_stage] ?? job.current_stage}
+                    </span>
+                    <span>执行 {job.attempt} 次</span>
+                    <span>{formatTime(job.updated_at)}</span>
+                  </div>
+                  {job.error_message ? (
+                    <p className="job-error">{job.error_message}</p>
+                  ) : null}
+                </div>
+                <div className="job-actions">
+                  {job.can_resume ? (
+                    <button disabled={busy} onClick={() => void resume(job)}>
+                      从失败处继续
+                    </button>
+                  ) : null}
+                  <button
+                    className="secondary"
+                    disabled={busy}
+                    onClick={() => void openJob(job)}
+                  >
+                    查看
+                  </button>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <p className="empty-jobs">还没有生成任务，创建项目后会在这里持续记录。</p>
+        )}
+      </section>
 
       {!project ? (
         <form className="panel form" onSubmit={create}>
@@ -440,9 +605,18 @@ export default function Home() {
               <h2>{project.title}</h2>
             </div>
             <div className="project-head-actions">
+              {project.status === "failed" && currentJob?.can_resume ? (
+                <button disabled={busy} onClick={() => void resume(currentJob)}>
+                  从失败处继续
+                </button>
+              ) : null}
               {regeneratableStatuses.has(project.status) ? (
                 <button disabled={busy} onClick={() => void regenerate()}>
-                  {project.status === "completed" ? "生成新版本" : "重新生成"}
+                  {project.status === "completed"
+                    ? "生成新版本"
+                    : project.status === "failed"
+                      ? "重新生成新版本"
+                      : "开始生成新版本"}
                 </button>
               ) : null}
               <button
@@ -548,4 +722,13 @@ async function request<T = unknown>(
 
 function messageOf(value: unknown) {
   return value instanceof Error ? value.message : String(value);
+}
+
+function formatTime(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(value));
 }

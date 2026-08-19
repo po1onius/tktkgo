@@ -43,11 +43,42 @@ CREATE TABLE project_versions (
     script_spec JSONB,
     storyboard_spec JSONB,
     render_spec JSONB,
+    script_review_status VARCHAR(16) NOT NULL DEFAULT 'pending',
+    script_review_feedback TEXT,
+    script_reviewed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (project_id, version)
+    UNIQUE (project_id, version),
+    CHECK (script_review_status IN ('pending', 'approved', 'rejected'))
 );
 CREATE INDEX idx_project_versions_project ON project_versions (project_id, version DESC);
+
+-- generation_jobs 是面向用户的一次完整视频生成任务。继续失败任务时复用同一行和
+-- project_version_id，只增加 attempt 并绑定新的 Restate Workflow，避免把“继续”误
+-- 实现为创建新版本。项目表仍保存当前状态快照，任务表负责完整历史和恢复上下文。
+CREATE TABLE generation_jobs (
+    id UUID PRIMARY KEY,
+    project_id UUID NOT NULL,
+    project_version_id UUID,
+    workflow_id UUID NOT NULL,
+    status VARCHAR(32) NOT NULL DEFAULT 'queued',
+    current_stage VARCHAR(64) NOT NULL DEFAULT 'queued',
+    failed_stage VARCHAR(64),
+    recoverable BOOLEAN NOT NULL DEFAULT FALSE,
+    attempt INTEGER NOT NULL DEFAULT 1,
+    error_code VARCHAR(64),
+    error_message TEXT,
+    started_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    CHECK (status IN ('queued', 'generating_script', 'waiting_script_review', 'generating_storyboard', 'generating_assets', 'building_timeline', 'rendering', 'completed', 'failed', 'rejected')),
+    CHECK (attempt > 0)
+);
+CREATE INDEX idx_generation_jobs_created_at ON generation_jobs (created_at DESC);
+CREATE INDEX idx_generation_jobs_project ON generation_jobs (project_id, created_at DESC);
+CREATE INDEX idx_generation_jobs_status ON generation_jobs (status, updated_at DESC);
+CREATE UNIQUE INDEX idx_generation_jobs_workflow ON generation_jobs (workflow_id);
 
 CREATE TABLE scenes (
     id UUID PRIMARY KEY,

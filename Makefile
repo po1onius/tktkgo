@@ -33,6 +33,12 @@ dev: ## 启动基础设施，并在宿主机构建、运行全部应用服务
 		echo "[env] 已创建应用配置 $(ENV_FILE)"; \
 	fi; \
 	set -a; source "$(ENV_FILE)"; set +a; \
+	# pnpm filter 会把 Render 的工作目录切换到 render/。素材目录必须在切换前转成 \
+	# 绝对路径，保证 Rust API、Workflow 与 Remotion 始终读写同一个 storage。 \
+	if [[ "$${TKTKGO_ASSET_ROOT:-./storage}" != /* ]]; then \
+		export TKTKGO_ASSET_ROOT="$$(pwd)/$${TKTKGO_ASSET_ROOT:-./storage}"; \
+	fi; \
+	echo "[env] 统一素材目录：$$TKTKGO_ASSET_ROOT"; \
 	api_pid=""; \
 	workflow_pid=""; \
 	render_pid=""; \

@@ -51,6 +51,79 @@ header p {
   padding: 30px;
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.28);
 }
+.jobs-panel {
+  margin-bottom: 24px;
+}
+.jobs-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.jobs-head h2 {
+  margin: 8px 0 0;
+  font-size: 26px;
+}
+.compact {
+  padding: 9px 14px;
+}
+.jobs-list {
+  display: grid;
+  gap: 12px;
+}
+.job-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: #0b1019;
+}
+.job-main {
+  min-width: 0;
+}
+.job-title-line,
+.job-meta,
+.job-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.job-title-line strong {
+  font-size: 16px;
+}
+.job-version,
+.job-meta,
+.empty-jobs {
+  color: var(--muted);
+  font-size: 12px;
+}
+.job-meta {
+  margin-top: 10px;
+}
+.job-error {
+  max-width: 680px;
+  margin: 10px 0 0;
+  color: #ffadb9;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.job-actions {
+  flex: 0 0 auto;
+}
+.job-actions button {
+  padding: 10px 14px;
+}
+.empty-jobs {
+  margin: 0;
+}
 .form {
   display: grid;
   gap: 22px;
@@ -166,6 +239,10 @@ button:disabled {
   color: #ff9dac;
   border-color: #733242;
 }
+.status.rejected {
+  color: #ffd68a;
+  border-color: #745826;
+}
 .meta {
   display: flex;
   flex-wrap: wrap;
@@ -259,5 +336,12 @@ button:disabled {
   .project-head-actions {
     width: 100%;
     flex-wrap: wrap;
+  }
+  .job-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .job-actions {
+    width: 100%;
   }
 }
