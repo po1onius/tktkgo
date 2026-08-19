@@ -9,14 +9,25 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
+import { RENDER_FONT_FAMILY, useRenderFonts } from "./fonts";
 import type { CaptionCue, RenderScene, RenderSpec } from "./types";
 
 export const GeneratedVideo: React.FC<{ spec: RenderSpec }> = ({ spec }) => {
+  // Fontsource 的中文字体按 Unicode Range 分包；把本次视频所有会展示的文字交给
+  // 字体加载器，确保涉及的 WOFF2 子集在 Remotion 捕获首帧之前全部准备完成。
+  const renderText = spec.scenes
+    .flatMap((scene) => [
+      scene.on_screen_text ?? "",
+      ...scene.captions.map((cue) => cue.text),
+    ])
+    .join("");
+  useRenderFonts(renderText);
+
   return (
     <AbsoluteFill
       style={{
         backgroundColor: spec.background_color,
-        fontFamily: '"Noto Sans SC", sans-serif',
+        fontFamily: RENDER_FONT_FAMILY,
       }}
     >
       {spec.scenes.map((scene) => (

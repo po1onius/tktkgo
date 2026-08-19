@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::{HeaderName, StatusCode},
+    http::{HeaderName, Method, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -18,6 +18,7 @@ use tktkgo_app::{
     run_migrations,
 };
 use tower_http::{
+    cors::{Any, CorsLayer},
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
     services::ServeDir,
     trace::TraceLayer,
@@ -56,6 +57,23 @@ async fn run(settings: Settings) -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let request_id_header = HeaderName::from_static("x-request-id");
+    // Remotion 的渲染页面由内部 HTTP 服务提供，与 API 的 8000 端口不是同源。
+    // 素材本身是通过 public_url 暴露的公开只读资源，因此仅在 /assets 上允许跨域读取；
+    // Range 请求和对应响应头是 @remotion/media 随机访问 WAV/视频数据所必需的。
+    let asset_routes = Router::<Arc<ApiState>>::new()
+        .fallback_service(ServeDir::new(&settings.asset_root))
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods([Method::GET, Method::HEAD])
+                .allow_headers([header::RANGE])
+                .expose_headers([
+                    header::ACCEPT_RANGES,
+                    header::CONTENT_LENGTH,
+                    header::CONTENT_RANGE,
+                    header::CONTENT_TYPE,
+                ]),
+        );
     let app = Router::new()
         .route("/health", get(health))
         .route("/v1/providers", get(list_providers))
@@ -72,7 +90,7 @@ async fn run(settings: Settings) -> Result<(), Box<dyn std::error::Error>> {
             "/v1/projects/{project_id}/script-review",
             post(review_script),
         )
-        .nest_service("/assets", ServeDir::new(&settings.asset_root))
+        .nest("/assets", asset_routes)
         // API 路由优先匹配，其余请求交给 Next.js 的静态导出目录处理。
         // ServeDir 会自动为根路径返回 index.html，并为不存在的文件保留正确的 404。
         .fallback_service(ServeDir::new(&settings.web_root))
@@ -85,6 +103,8 @@ async fn run(settings: Settings) -> Result<(), Box<dyn std::error::Error>> {
     info!(
         address = %settings.api_addr,
         web_root = %settings.web_root.display(),
+        asset_root = %settings.asset_root.display(),
+        asset_cors = "public-read-only",
         "tktkgo API 与 Web 已启动"
     );
     axum::serve(listener, app)
