@@ -17,8 +17,6 @@ __pycache__/
 
 # Provider Key、本地模型权重、Python 环境和私有音色样本不纳入版本控制。
 provider/providers.toml
-# 旧版聚合配置仅为迁移保留，新架构不会读取。
-local-providers/providers.toml
 local-models/**/.venv/
 local-models/**/provider.toml
 local-models/**/models/
